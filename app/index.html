@@ -25,24 +25,37 @@
   <div id="clock"></div>
 </header>
 
-<main id="view-live" class="view">
+<main id="view-browse" class="view">
   <aside id="cats"></aside>
   <section id="rows" class="rows"></section>
   <section id="grid" class="grid hidden"></section>
 </main>
 
 <main id="view-search" class="view hidden">
-  <div class="searchbar"><input id="q" type="text" placeholder="Search channels" autocomplete="off" spellcheck="false"></div>
-  <section id="sgrid" class="grid"></section>
+  <div class="searchbar"><input id="q" type="text" placeholder="Search channels, movies and series" autocomplete="off" spellcheck="false"></div>
+  <section id="srows" class="rows"></section>
 </main>
 
-<main id="view-vod" class="view hidden">
-  <div class="empty">
-    <h2 id="vod-title">Movies</h2>
-    <p>Nothing here yet: Dispatcharr has no movies or series, because VOD is switched off for the provider account.</p>
-    <p class="muted">Turn on VOD for the provider account in Dispatcharr, then ask for the Movies and Series tabs to be wired up.</p>
+<!-- Movie / series page: opens over the browse view, the player opens over it. -->
+<div id="details" class="hidden">
+  <div id="d-backdrop"></div>
+  <div class="d-shade"></div>
+  <div class="dclose">✕</div>
+  <div class="d-body">
+    <div class="d-top">
+      <img id="d-poster" alt="">
+      <div class="d-info">
+        <h1 id="d-title"></h1>
+        <div id="d-meta" class="d-meta"></div>
+        <div id="d-plot" class="d-plot"></div>
+        <div id="d-credits" class="d-credits"></div>
+        <div id="d-btns" class="d-btns"></div>
+      </div>
+    </div>
+    <div id="d-seasons" class="d-seasons hidden"></div>
+    <div id="d-eps" class="d-eps hidden"></div>
   </div>
-</main>
+</div>
 
 <div id="player" class="hidden">
   <video id="video" autoplay playsinline></video>
@@ -64,6 +77,13 @@
       <div class="btn" data-act="list">Channel list</div>
       <div class="hint">▲▼ change channel · OK info · Back list</div>
     </div>
+  </div>
+  <div id="vosd" class="hidden">
+    <div class="v-title" id="v-title"></div>
+    <div class="v-sub" id="v-sub"></div>
+    <div class="bar v-bar"><i id="v-bar"></i></div>
+    <div class="v-times"><span id="v-pos"></span><span id="v-state"></span><span id="v-dur"></span></div>
+    <div class="hint">OK pause · ◀▶ 10 s · ▲▼ or ⏪⏩ 1 min · Back to the page</div>
   </div>
   <div id="picker" class="hidden"><h4>Choose version</h4><div id="picker-list"></div></div>
   <div id="status" class="hidden"></div>

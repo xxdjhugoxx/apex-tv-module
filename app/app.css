@@ -19,7 +19,8 @@ body { background: #0b0b0f; color: #f2f2f5; font-family: "Samsung One", "Roboto"
 #clock { margin-left: auto; font-size: 1.3rem; font-weight: 700; color: #d0d0d8; }
 
 .view { display: flex; position: absolute; top: 4.2rem; left: 0; right: 0; bottom: 0; }
-#view-search, #view-vod { flex-direction: column; }
+#view-search { flex-direction: column; }
+#view-search .rows { padding-left: 2.2rem; }
 
 #cats { width: 17rem; flex: 0 0 auto; overflow: hidden; padding: .5rem 0 2rem 1.5rem; }
 .cat { font-size: 1.05rem; font-weight: 600; color: #b9b9c4; padding: .55rem .9rem; margin-bottom: .2rem; border-radius: .4rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -47,7 +48,6 @@ body { background: #0b0b0f; color: #f2f2f5; font-family: "Samsung One", "Roboto"
 .searchbar { padding: .5rem 2.2rem 1rem; flex: 0 0 auto; }
 #q { width: 40rem; max-width: 100%; font-size: 1.4rem; padding: .7rem 1.1rem; border-radius: .5rem; border: .2rem solid #33333f; background: #17171f; color: #fff; outline: none; }
 #q.focus { border-color: #fff; }
-#view-search .grid { padding-left: 2.2rem; }
 
 .empty { margin: 6rem auto 0; max-width: 44rem; text-align: center; }
 .empty h2 { font-size: 2.2rem; margin-bottom: 1.2rem; }
@@ -95,3 +95,53 @@ body { background: #0b0b0f; color: #f2f2f5; font-family: "Samsung One", "Roboto"
 .pv.cur:before { content: "▶ "; color: #e50914; }
 .pv.focus { background: #fff; color: #000; }
 .pv.bad { color: #75757f; text-decoration: line-through; }
+
+/* Movies / Series: poster tiles (2:3) */
+.tile.poster { width: 9rem; }
+.tile.poster .art { height: 13.5rem; background: #1b1b24; }
+.tile.poster .art img { position: absolute; left: 0; top: 0; width: 100%; height: 100%; max-width: none; max-height: none; object-fit: cover; }
+.tile.poster .ph { padding: .6rem; font-size: .85rem; font-weight: 700; color: #6f6f7c; text-align: center; overflow: hidden; max-height: 100%; }
+.tile.poster .meta { padding: .45rem .5rem .5rem; }
+.tile.poster .name { font-size: .9rem; }
+.tile.poster .now { font-size: .8rem; min-height: 1rem; }
+.msg.big { font-size: 1.4rem; color: #8c8c99; padding: 3rem 1rem; white-space: normal; }
+
+/* movie / series page */
+#details { position: fixed; left: 0; top: 0; right: 0; bottom: 0; z-index: 8; background: #0b0b0f; overflow: hidden; }
+#d-backdrop { position: absolute; right: 0; top: 0; width: 72%; height: 78%; background: #0b0b0f center top no-repeat; background-size: cover; }
+.d-shade { position: absolute; left: 0; top: 0; right: 0; bottom: 0;
+  background: linear-gradient(to right, #0b0b0f 28%, rgba(11,11,15,.6) 62%, rgba(11,11,15,.25) 100%), linear-gradient(to top, #0b0b0f 24%, rgba(11,11,15,0) 70%); }
+.dclose { position: absolute; right: 2rem; top: 1.4rem; font-size: 1.6rem; color: #8c8c99; z-index: 2; }
+.d-body { position: absolute; left: 0; top: 0; right: 0; bottom: 0; padding: 3rem 3.5rem 1.5rem; display: flex; flex-direction: column; }
+.d-top { display: flex; flex: 0 0 auto; }
+#d-poster { width: 13rem; height: 19.5rem; object-fit: cover; border-radius: .6rem; margin-right: 2.2rem; flex: 0 0 auto; background: #1b1b24; box-shadow: 0 .6rem 2rem rgba(0,0,0,.6); }
+.d-info { min-width: 0; max-width: 56rem; }
+.d-info h1 { font-size: 2.5rem; font-weight: 900; line-height: 1.15; }
+.d-meta { font-size: 1.1rem; color: #c8c8d0; margin: .6rem 0 .9rem; }
+.d-plot { font-size: 1.12rem; line-height: 1.45; color: #e2e2e8; max-height: 6.6rem; overflow: hidden; }
+.d-credits { font-size: .9rem; color: #8c8c99; margin-top: .7rem; max-height: 2.6rem; overflow: hidden; }
+.d-btns { display: flex; align-items: center; margin-top: 1.3rem; }
+.dbtn { font-size: 1.15rem; font-weight: 700; padding: .7rem 1.6rem; border-radius: .45rem; background: rgba(255,255,255,.16); margin-right: 1rem; white-space: nowrap; }
+.dbtn.focus { background: #fff; color: #000; }
+.d-seasons { flex: 0 0 auto; white-space: nowrap; overflow: hidden; margin-top: 1.5rem; }
+.season { display: inline-block; font-size: 1.05rem; font-weight: 700; color: #b9b9c4; padding: .45rem 1.1rem; margin-right: .5rem; border-radius: .4rem; }
+.season.active { color: #fff; background: #1d1d26; }
+.season.focus { background: #fff; color: #000; }
+.d-eps { flex: 1 1 auto; min-height: 0; overflow: hidden; margin-top: 1rem; max-width: 72rem; }
+.ep { display: flex; padding: .65rem 1rem; border-radius: .5rem; border-left: .25rem solid transparent; }
+.ep.focus { background: #23232e; border-left-color: #e50914; }
+.epn { width: 3rem; flex: 0 0 auto; font-size: 1.25rem; font-weight: 800; color: #8c8c99; }
+.ept { flex: 1 1 auto; min-width: 0; }
+.epname { font-size: 1.1rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.epname .muted { font-weight: 400; font-size: .95rem; margin-left: 1rem; }
+.epplot { font-size: .95rem; color: #b5b5c0; margin-top: .3rem; line-height: 1.4; }
+.ep .bar { margin-top: .45rem; max-width: 20rem; }
+
+/* movie / episode player overlay */
+#vosd { position: absolute; left: 0; right: 0; bottom: 0; padding: 5rem 3rem 2rem; background: linear-gradient(rgba(0,0,0,0) 0%, rgba(0,0,0,.9) 45%); }
+.v-title { font-size: 1.9rem; font-weight: 800; }
+.v-sub { font-size: 1.1rem; color: #b5b5c0; margin: .2rem 0 1rem; }
+.v-bar { height: .4rem; }
+.v-times { display: flex; justify-content: space-between; font-size: 1.05rem; margin-top: .55rem; color: #d0d0d8; }
+#v-state { font-weight: 800; color: #fff; }
+#vosd .hint { margin-top: .8rem; text-align: right; }

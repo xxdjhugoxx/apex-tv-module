@@ -1,9 +1,20 @@
 {
   "name": "apex-tv-module",
-  "version": "1.0.0",
-  "description": "APEX TV: Hugo's self-hosted live TV (Dispatcharr on the home LAN) as a TizenBrew app module.",
+  "version": "1.1.0",
+  "description": "APEX TV: Hugo's self-hosted live TV, movies and series (Dispatcharr on the home LAN) as a TizenBrew app module.",
   "packageType": "app",
   "appName": "APEX TV",
   "appPath": "app/index.html",
-  "keys": ["ChannelUp", "ChannelDown", "ColorF2Yellow", "Info", "MediaPlayPause", "MediaPlay", "MediaPause", "MediaStop"]
+  "keys": [
+    "ChannelUp",
+    "ChannelDown",
+    "ColorF2Yellow",
+    "Info",
+    "MediaPlayPause",
+    "MediaPlay",
+    "MediaPause",
+    "MediaStop",
+    "MediaFastForward",
+    "MediaRewind"
+  ]
 }
