@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>APEX TV</title>
+<script>window.APEXTV_API='http://192.168.0.176:8095/';window.APEXTV_LOG='http://192.168.0.176:8095/api/log';window.APEXTV_DISPATCHARR='http://192.168.0.176:9191';</script>
+<script src="tvlog.js"></script>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<!-- Boot screen, styled inline so it shows even if app.css or app.js fail. app.js hides it when channels load. -->
+<div id="boot" style="position:fixed;left:0;top:0;right:0;bottom:0;z-index:50;background:#0b0b0f;color:#e6e6ea;font:32px Arial,sans-serif;text-align:center;padding-top:40vh">
+  <div style="font-size:64px;font-weight:900;color:#e50914;letter-spacing:3px">APEX<span style="color:#fff;margin-left:10px">TV</span></div>
+  <div id="boot-msg" style="margin:28px auto 0;max-width:80%">Loading APEX TV...</div>
+</div>
+<header id="top">
+  <div class="brand">APEX<span>TV</span></div>
+  <nav id="tabs">
+    <div class="tab" data-tab="live">Live TV</div>
+    <div class="tab" data-tab="movies">Movies</div>
+    <div class="tab" data-tab="series">Series</div>
+    <div class="tab" data-tab="search">Search</div>
+  </nav>
+  <div id="clock"></div>
+</header>
+
+<main id="view-live" class="view">
+  <aside id="cats"></aside>
+  <section id="rows" class="rows"></section>
+  <section id="grid" class="grid hidden"></section>
+</main>
+
+<main id="view-search" class="view hidden">
+  <div class="searchbar"><input id="q" type="text" placeholder="Search channels" autocomplete="off" spellcheck="false"></div>
+  <section id="sgrid" class="grid"></section>
+</main>
+
+<main id="view-vod" class="view hidden">
+  <div class="empty">
+    <h2 id="vod-title">Movies</h2>
+    <p>Nothing here yet: Dispatcharr has no movies or series, because VOD is switched off for the provider account.</p>
+    <p class="muted">Turn on VOD for the provider account in Dispatcharr, then ask for the Movies and Series tabs to be wired up.</p>
+  </div>
+</main>
+
+<div id="player" class="hidden">
+  <video id="video" autoplay playsinline></video>
+  <div id="osd" class="hidden">
+    <div class="osd-row">
+      <div class="osd-logo"><img id="osd-logo" alt=""></div>
+      <div class="osd-main">
+        <div class="osd-name"><span id="osd-num"></span> <span id="osd-name"></span> <span id="osd-fav" class="star hidden">★</span> <span id="osd-q" class="qbadge"></span></div>
+        <div class="osd-group" id="osd-group"></div>
+        <div class="osd-now" id="osd-now"></div>
+        <div class="bar"><i id="osd-bar"></i></div>
+        <div class="osd-next" id="osd-next"></div>
+        <div class="osd-desc" id="osd-desc"></div>
+      </div>
+    </div>
+    <div class="osd-buttons">
+      <div class="btn" data-act="fav" id="btn-fav">★ Favorite</div>
+      <div class="btn" data-act="ver" id="btn-ver">Version</div>
+      <div class="btn" data-act="list">Channel list</div>
+      <div class="hint">▲▼ change channel · OK info · Back list</div>
+    </div>
+  </div>
+  <div id="picker" class="hidden"><h4>Choose version</h4><div id="picker-list"></div></div>
+  <div id="status" class="hidden"></div>
+</div>
+
+<script src="vendor/mpegts.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
