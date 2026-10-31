@@ -146,20 +146,11 @@ body { background: #0b0b0f; color: #f2f2f5; font-family: "Samsung One", "Roboto"
 #v-state { font-weight: 800; color: #fff; }
 #vosd .hint { margin-top: .8rem; text-align: right; }
 
-/* v1.2: tab bar with 8 tabs, browse column with a banner */
+/* v1.2: tab bar with 7 tabs */
 .tab { font-size: 1.02rem; padding: .45rem .8rem; margin-right: .2rem; }
 .tab.profile { margin-left: 1rem; color: #d0d0d8; }
 #view-browse .main { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
 #view-browse .main .rows, #view-browse .main .grid { flex: 1 1 auto; }
-#banner { margin: .3rem 1.2rem .6rem; padding: .6rem 1rem; border-radius: .5rem; background: #17171f; font-size: .95rem; color: #c8c8d0; line-height: 1.45; }
-#banner.warn { background: #3a1416; color: #ffd3d6; }
-
-/* recordings */
-.tile.rec .art .ph { font-size: 1rem; color: #8c8c99; padding: .5rem; text-align: center; }
-.tile.rec .art .ph.big { font-size: 3rem; color: #e50914; }
-.tile.rec .rs { left: auto; right: .45rem; }
-.tile.recording .rs { background: #e50914; color: #fff; }
-.tile.failed .rs { background: #6b6b75; color: #fff; }
 
 /* TV Guide */
 #view-guide { flex-direction: column; padding: 0 2rem 1rem; }
@@ -186,7 +177,6 @@ body { background: #0b0b0f; color: #f2f2f5; font-family: "Samsung One", "Roboto"
 .g-p.live { background: #22222e; }
 .g-p.focus { background: #fff; color: #000; z-index: 1; }
 .g-p.muted { color: #6f6f7c; }
-.recdot { color: #e50914; margin-right: .3rem; }
 
 /* popup menu, PIN pad, channel number, toast */
 #menu, #pin { position: fixed; left: 50%; top: 50%; -webkit-transform: translate(-50%, -50%); transform: translate(-50%, -50%); z-index: 30;

@@ -1,7 +1,7 @@
 {
   "name": "apex-tv-module",
-  "version": "1.2.0",
-  "description": "APEX TV: Hugo's self-hosted live TV, guide, recordings, movies, series and Jellyfin library (home LAN) as a TizenBrew app module.",
+  "version": "1.2.1",
+  "description": "APEX TV: Hugo's self-hosted live TV, guide, movies, series and Jellyfin library (home LAN) as a TizenBrew app module.",
   "packageType": "app",
   "appName": "APEX TV",
   "appPath": "app/index.html",
@@ -16,8 +16,6 @@
     "MediaStop",
     "MediaFastForward",
     "MediaRewind",
-    "ColorF0Red",
-    "MediaRecord",
     "0",
     "1",
     "2",

@@ -1,27 +1,39 @@
 /* APEX TV front end. Plain ES2017 without ?. or ?? so Tizen 4+ (Chromium 56) and webOS run it.
-   Remote: arrows, OK (Enter), Back (Tizen 10009, webOS 461, Esc, Backspace outside the search box), 0-9, red = record.
+   Remote: arrows, OK (Enter), Back (Tizen 10009, webOS 461, Esc, Backspace outside the search box), 0-9.
    Live: one tile per channel; its versions (4K/FHD/HD/SD/H265) come best first from the server. OK plays the best
    version and falls back to the next one if it fails. Live video comes straight from Dispatcharr's MPEG-TS
    proxy and plays through mpegts.js (MSE).
-   Guide: channels x time from the server's EPG; OK plays or records (Dispatcharr DVR through the server).
+   Guide: channels x time from the server's EPG; OK plays the channel.
    Movies / Series / My Library: posters by category, a details page (seasons and episodes for a series) and MP4/MKV
-   played by the <video> element itself (Dispatcharr's VOD proxy, or the server's relay for Jellyfin and recordings).
+   played by the <video> element itself (Dispatcharr's VOD proxy, or the server's relay for Jellyfin).
    Profiles (Hugo, Wife, Kids) keep their own favorites, recent, Continue watching and last channel on this device.
    Adult content stays hidden until the PIN is entered; the Kids profile never shows it and needs the PIN to leave. */
 (function () {
   'use strict';
   var KEY = { L: 37, U: 38, R: 39, D: 40, OK: 13, CHUP: [427, 33], CHDN: [428, 34], BACK: [10009, 461, 27, 8], FAV: [405, 70], INFO: [457, 73],
-    PLAYPAUSE: [10252, 415, 19], STOP: [413], FF: [417], RW: [412], REC: [403, 82, 416] };
+    PLAYPAUSE: [10252, 415, 19], STOP: [413], FF: [417], RW: [412] };
   var store = {
     get: function (k, d) { try { var v = localStorage.getItem('apextv.' + k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
     set: function (k, v) { try { localStorage.setItem('apextv.' + k, JSON.stringify(v)); } catch (e) { /* private mode: keep in memory only */ } }
   };
-  var $ = function (id) { return document.getElementById(id); };
+  // A missing element (an index.html from another version, a cached page) must not stop the app: $() then returns
+  // a detached stand-in and the remote log says which id was missing.
+  var VERSION = '1.2.1', missing = {};
+  window.APEXTV_APP = VERSION;
+  var $ = function (id) {
+    var el = document.getElementById(id);
+    if (el) return el;
+    if (!missing[id]) {
+      missing[id] = document.createElement('div');
+      if (window.tvlog) window.tvlog('error', 'missing element #' + id, { app: VERSION, html: window.APEXTV_PAGE || '?' });
+    }
+    return missing[id];
+  };
   // Served by server.py these are same-origin. The TizenBrew module runs from 127.0.0.1:8081 on the TV and sets
   // window.APEXTV_API / APEXTV_DISPATCHARR to the LAN server before this script.
   var API = window.APEXTV_API || '';
   var DISPATCHARR = window.APEXTV_DISPATCHARR || ('http://' + location.hostname + ':9191');
-  var TABS = ['live', 'guide', 'movies', 'series', 'library', 'recordings', 'search', 'profile'];
+  var TABS = ['live', 'guide', 'movies', 'series', 'library', 'search', 'profile'];
   var VODTAB = { movies: 'movie', series: 'series', library: 'lib' };
   var ROW_FIRST = 14;           // tiles drawn per row before the row gets focus
   var GRID_STEP = 120;          // tiles drawn per step in a grid (a movie category has up to 2500)
@@ -53,7 +65,7 @@
     tab: 'live', zone: 'side', tabIdx: 0, epg: {},
     playing: null, playList: [], playIdx: 0, vIdx: 0, bad: {}, player: null, loadTimer: null, osdTimer: null,
     osdBtn: -1, picker: false, pickIdx: 0, watch: null, vod: null, det: null, menu: null, pin: null,
-    g: null, guideIds: null, recData: null, recItems: [], ruleItems: [], num: ''
+    g: null, guideIds: null, num: ''
   };
   var k0 = fresh(); for (var f in k0) S[f] = k0[f];
   var VOD = { movie: null, series: null, lib: null }, vodWait = {}, vodFailed = {};
@@ -76,11 +88,6 @@
   function tilesOf(keys) { return keys.map(function (k) { return S.byKey[k]; }).filter(function (t) { return t && visible(t); }); }
   function getJson(url) {
     return fetch(url).then(function (r) {
-      return r.json().then(function (d) { if (!r.ok) throw new Error(d && d.error || 'HTTP ' + r.status); return d; });
-    });
-  }
-  function postJson(url, body) {   // text/plain: a "simple" request, no CORS preflight
-    return fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify(body) }).then(function (r) {
       return r.json().then(function (d) { if (!r.ok) throw new Error(d && d.error || 'HTTP ' + r.status); return d; });
     });
   }
@@ -184,7 +191,7 @@
 
   // ---------- Continue watching (this profile, this device) ----------
   // S.cw: newest first, one entry per movie or series: {k, cat, kind, id, pos, dur, at, ep: {uuid, s, e, title} for a series}.
-  // S.epos: position per episode uuid (or 'rec:<id>' for a recording) [pos, dur], for the progress bars.
+  // S.epos: position per episode uuid [pos, dur], for the progress bars.
   function cwOf(t) { var k = t.kind + ':' + t.id; for (var i = 0; i < S.cw.length; i++) if (S.cw[i].k === k) return S.cw[i]; return null; }
   function cwItems(cat) {
     var V = VOD[cat];
@@ -197,11 +204,10 @@
     if (!v || !v.started) return;
     var dur = vodDur(), pos = ended ? dur : (v.seekTo >= 0 ? v.seekTo : curPos());
     var t = v.item, k = t.kind + ':' + t.id, done = ended || (dur > 0 && pos > dur * 0.95), entry = null;
-    if (t.kind === 'rec' || v.ep) {
-      S.epos[t.kind === 'rec' ? 'rec:' + t.id : v.ep.uuid] = [Math.floor(done ? dur : pos), Math.floor(dur)];
+    if (v.ep) {
+      S.epos[v.ep.uuid] = [Math.floor(done ? dur : pos), Math.floor(dur)];
       var ks = Object.keys(S.epos); if (ks.length > 600) ks.slice(0, ks.length - 500).forEach(function (x) { delete S.epos[x]; });
       ps.set('epos', S.epos);
-      if (t.kind === 'rec') return;
       var nx = done ? nextEp(v) : v.ep;
       if (nx && (done || pos >= 30)) entry = { ep: { uuid: nx.uuid, s: nx.s, e: nx.e, title: nx.title }, pos: done ? 0 : Math.floor(pos), dur: done ? nx.dur : Math.floor(dur) };
       if (!entry && !done) return;            // a few seconds of another episode: keep the old place
@@ -214,14 +220,14 @@
 
   // ---------- tiles ----------
   function tileHtml(t) {
-    return t.kind === 'ch' ? chanHtml(t) : t.kind === 'rec' ? recHtml(t) : t.kind === 'rule' ? ruleHtml(t) : posterHtml(t);
+    return t.kind === 'ch' ? chanHtml(t) : posterHtml(t);
   }
   function dataK(t) {
-    return t.kind === 'ch' ? 'c:' + t.i : t.kind === 'rec' ? 'r:' + t.i : t.kind === 'rule' ? 'u:' + t.i : 'v:' + t.cat + ':' + t.i;
+    return t.kind === 'ch' ? 'c:' + t.i : 'v:' + t.cat + ':' + t.i;
   }
   function itemOf(el) {
     var k = el.getAttribute('data-k').split(':');
-    return k[0] === 'c' ? S.T[+k[1]] : k[0] === 'r' ? S.recItems[+k[1]] : k[0] === 'u' ? S.ruleItems[+k[1]] : VOD[k[1]].items[+k[2]];
+    return k[0] === 'c' ? S.T[+k[1]] : VOD[k[1]].items[+k[2]];
   }
   function chanHtml(t) {
     var p = nowProg(t), fav = S.favs.indexOf(t.key) >= 0, best = t.v[0];
@@ -242,20 +248,6 @@
       (t.logo ? '<img data-src="' + esc(posterUrl(t)) + '" alt="">' : '') + (t.tag ? '<span class="vers">' + esc(t.tag) + '</span>' : '') +
       '</div><div class="meta"><div class="name">' + esc(t.name) + '</div><div class="now">' + esc(sub) + '</div>' +
       (p ? '<div class="bar"><i style="width:' + p + '%"></i></div>' : '') + '</div></div>';
-  }
-  var REC_LABEL = { recording: '● REC', scheduled: 'Scheduled', recorded: '', failed: 'Failed' };
-  function recHtml(r) {
-    var ch = chanOfUuid(r.uuid), p = S.epos['rec:' + r.id], w = p && p[1] ? Math.min(100, p[0] / p[1] * 100) : 0;
-    return '<div class="tile rec ' + r.status + '" data-k="' + dataK(r) + '"><div class="art">' +
-      (ch && ch.logo ? '<img data-src="' + esc(ch.logo) + '" alt="">' : '<span class="ph">' + esc(r.chname) + '</span>') +
-      (REC_LABEL[r.status] ? '<span class="num rs">' + REC_LABEL[r.status] + '</span>' : '') + '</div>' +
-      '<div class="meta"><div class="name">' + esc(r.title) + '</div><div class="now">' + esc(day(r.start) + ' ' + hm(r.start) + '–' + hm(r.end) + ' · ' + (ch ? ch.name : r.chname)) + '</div>' +
-      '<div class="bar"><i style="width:' + (r.status === 'recording' ? pct([r.start, r.end]) : w) + '%"></i></div></div></div>';
-  }
-  function ruleHtml(r) {
-    return '<div class="tile rec rule" data-k="' + dataK(r) + '"><div class="art"><span class="ph big">⟳</span></div><div class="meta">' +
-      '<div class="name">' + esc(r.title) + '</div><div class="now">' + (r.mode === 'new' ? 'New episodes' : 'Every episode') +
-      (r.chname ? ' · ' + esc(r.chname) : '') + '</div><div class="bar"><i style="width:0"></i></div></div></div>';
   }
   var io = 'IntersectionObserver' in window ? new IntersectionObserver(function (es) {
     es.forEach(function (e) { if (e.isIntersecting) { var im = e.target; im.src = im.getAttribute('data-src'); io.unobserve(im); } });
@@ -285,8 +277,6 @@
     var t = list[i];
     if (!t) return;
     if (t.kind === 'ch') play(list, i);
-    else if (t.kind === 'rec') recMenu(t);
-    else if (t.kind === 'rule') ruleMenu(t);
     else openDetails(t);
   }
 
@@ -393,7 +383,7 @@
     openMenu('Who is watching?', 'Profiles keep their own favorites, recent channels and Continue watching on this TV.', items);
   }
   function refreshTab() {   // after a lock/unlock: rebuild what is on screen
-    if (S.tab === 'live' || VODTAB[S.tab] || S.tab === 'recordings') redrawBrowse();
+    if (S.tab === 'live' || VODTAB[S.tab]) redrawBrowse();
     else if (S.tab === 'guide') { S.g = null; openGuide(); }
     else if (S.tab === 'search') runSearch();
   }
@@ -432,7 +422,7 @@
     S.sideIdx = i;
     $('rows').classList.toggle('hidden', item.kind !== 'home');
     $('grid').classList.toggle('hidden', item.kind === 'home');
-    if (item.kind === 'home') renderRows(S.tab === 'recordings' ? 'No recordings yet. Record from the Guide (OK on a programme) or from the player (● Record).' : '');
+    if (item.kind === 'home') renderRows('');
     else { S.list = item.t; S.tileIdx = 0; renderGrid(S.list, item.name === '★ Favorites' ? 'No favorites yet.' : 'Nothing here.'); }
     focusSide();
   }
@@ -521,12 +511,10 @@
     $('view-browse').classList.toggle('hidden', t === 'search' || t === 'guide');
     $('view-search').classList.toggle('hidden', t !== 'search');
     $('view-guide').classList.toggle('hidden', t !== 'guide');
-    $('banner').classList.add('hidden');
     renderTabs();
     if (t === 'live') { if (S.T.length) redrawBrowse(); }
     else if (t === 'search') renderRows(S.rows.length ? '' : 'Search channels, movies and series.');
     else if (t === 'guide') openGuide();
-    else if (t === 'recordings') openRecordings();
     else openVodTab(t);
   }
   function renderTabs() {
@@ -602,7 +590,7 @@
   function redrawBrowse() {   // rebuild the tab on screen (favorites, recent, Continue watching changed), keep the focus
     var side = S.side[S.sideIdx], name = side && side.name, cols = {}, rowName = S.rows[S.rowIdx] && S.rows[S.rowIdx].name, tile = S.tileIdx;
     S.rows.forEach(function (r, ri) { cols[r.name] = S.rowCol[ri] || 0; });   // rows move when Recently watched appears
-    if (S.tab === 'live') build(); else if (S.tab === 'recordings') recBuild(); else vodBuild(S.tab);
+    if (S.tab === 'live') build(); else vodBuild(S.tab);
     var i = 0; while (i < S.side.length && S.side[i].name !== name) i++;
     S.sideIdx = i < S.side.length ? i : 0;
     renderSide();
@@ -610,7 +598,7 @@
     $('rows').classList.toggle('hidden', !home);
     $('grid').classList.toggle('hidden', home);
     if (home) {
-      renderRows(S.tab === 'recordings' ? 'No recordings yet. Record from the Guide (OK on a programme) or from the player (● Record).' : '');
+      renderRows('');
       S.rowIdx = Math.max(0, S.rows.map(function (r) { return r.name; }).indexOf(rowName));
       S.rowCol = S.rows.map(function (r) { return Math.min(cols[r.name] || 0, Math.max(0, r.t.length - 1)); });
       S.rows.forEach(function (r, ri) { if (S.rowCol[ri] >= ROW_FIRST) fillRow(ri); });
@@ -680,11 +668,9 @@
     var n = nextWorking(t, S.vIdx + 1);
     if (n < 0) n = nextWorking(t, 0);
     if (n >= 0) { S.vIdx = n; status('Trying ' + (t.v[n].label || 'another version') + '…'); S.loadTimer = setTimeout(startVideo, 400); }
-    else status(recBusy() ? 'Channel unavailable: the provider allows 1 stream and a recording is using it. ▲▼ for another channel.'
-      : 'Channel unavailable. ▲▼ for another channel.');
+    else status('Channel unavailable. ▲▼ for another channel.');
     showOsd(true);
   }
-  function recBusy() { return !!(S.recData && S.recData.recs.some(function (r) { return r.status === 'recording'; })); }
   function verdict(w, now) {   // why a live version counts as failed, or '' while it is fine
     // Before the first frame Dispatcharr may still be connecting to the source (Pluto-style sources take 10 s or more);
     // a source that is down ends the stream instead, which fails at once (LOADING_COMPLETE / ERROR).
@@ -759,11 +745,10 @@
       } else if (S.zone === 'grid' || S.zone === 'side') { var i = S.list.indexOf(cur); if (i >= 0) { S.tileIdx = i; S.zone = 'grid'; } focusTile(); }
     } else if (S.tab === 'guide') { if (S.zone !== 'tabs') S.zone = 'guide'; guideJump(cur); }
     else if (S.tab === 'search') { S.zone = 'rows'; focusRow(); }
-    else if (S.tab === 'recordings') redrawBrowse();
   }
   function status(t) { $('status').textContent = t; $('status').classList.toggle('hidden', !t); }
 
-  var OSD_BTNS = ['fav', 'ver', 'rec', 'list'];
+  var OSD_BTNS = ['fav', 'ver', 'list'];
   function showOsd(on) {
     clearTimeout(S.osdTimer);
     $('osd').classList.toggle('hidden', !on);
@@ -803,142 +788,12 @@
     keepVisible($('picker-list'), $('picker-list').children[S.pickIdx]);
   }
   function closePicker() { S.picker = false; $('picker').classList.add('hidden'); }
-  function recordFromPlayer() {
-    var t = S.playing, p = nowProg(t), now = Math.floor(Date.now() / 1000);
-    if (p && p.now) { recordMenu(t, p.now, S.vIdx); return; }
-    openMenu('Record ' + t.name, 'No programme info for this channel: record a fixed time from now.', [
-      { label: '● Record 30 minutes', act: function () { recordProgram(t, [now, now + 1800, t.name, ''], 'once', S.vIdx); } },
-      { label: '● Record 1 hour', act: function () { recordProgram(t, [now, now + 3600, t.name, ''], 'once', S.vIdx); } },
-      { label: '● Record 2 hours', act: function () { recordProgram(t, [now, now + 7200, t.name, ''], 'once', S.vIdx); } },
-      { label: 'Cancel' }]);
-  }
-
-  // ---------- recording: schedule from the Guide or the player ----------
-  function chanOfUuid(u) {
-    if (!S.byUuid) { S.byUuid = {}; S.T.forEach(function (t) { t.v.forEach(function (v) { S.byUuid[v.id] = t; }); }); }
-    return S.byUuid[u];
-  }
-  function recOf(t, p) {   // the scheduled or running recording of this programme, if any
-    if (!S.recData) return null;
-    var ids = t.v.map(function (v) { return v.id; });
-    return S.recData.recs.filter(function (r) {
-      return ids.indexOf(r.uuid) >= 0 && r.start < p[1] && r.end > p[0] && (r.status === 'scheduled' || r.status === 'recording');
-    })[0] || null;
-  }
-  function recordMenu(t, p, vIdx) {
-    var now = Date.now() / 1000, onAir = p[0] <= now && p[1] > now, r = recOf(t, p), items = [];
-    var watching = S.playing === t && !$('player').classList.contains('hidden');
-    if (onAir && !watching) {
-      items.push({ label: '▶ Watch now', act: function () { var i = S.g ? S.g.list.indexOf(t) : -1; if (i >= 0) play(S.g.list, i); else play([t], 0); } });
-    }
-    // A block named after the channel is Dispatcharr's placeholder for a channel without a real guide: no episodes to follow.
-    var bare = function (x) { return norm(x).replace(/\b(sd|hd|fhd|uhd|4k|h265|hevc|alt)\b/g, '').replace(/\W/g, ''); };
-    var placeholder = bare(p[2]) === bare(t.name);
-    if (r) items.push({ label: r.status === 'recording' ? '■ Stop this recording' : '✕ Cancel this recording', act: function () { recAction(r.status === 'recording' ? 'stop' : 'delete', r); } });
-    else items.push({ label: onAir ? '● Record this show (from now)' : '● Record this show', act: function () { recordProgram(t, p, 'once', vIdx); } });
-    if (!placeholder) items.push({ label: '● Record every episode', act: function () { recordProgram(t, p, 'all', vIdx); } },
-      { label: '● Record new episodes only', act: function () { recordProgram(t, p, 'new', vIdx); } });
-    items.push({ label: 'Cancel' });
-    openMenu(p[2], day(p[0]) + '  ' + hm(p[0]) + '–' + hm(p[1]) + '  ·  ' + t.name + (placeholder ? '  ·  no real guide for this channel' : ''), items);
-  }
-  function recordProgram(t, p, mode, vIdx) {
-    var first = vIdx === undefined ? prefIdx(t) : vIdx, uuids = [t.v[first].id];
-    t.v.forEach(function (v) { if (uuids.indexOf(v.id) < 0) uuids.push(v.id); });
-    toast('Scheduling…', 3000);
-    postJson(API + 'api/rec/schedule', { uuids: uuids, start: p[0], stop: p[1], title: p[2], desc: p[3] || '', mode: mode }).then(function (d) {
-      var msg = mode === 'once' ? 'Recording scheduled: ' + p[2] + '.'
-        : 'Following "' + p[2] + '"' + (mode === 'new' ? ' (new episodes)' : '') + ': ' + (d.scheduled || 0) + ' upcoming scheduled.';
-      toast(msg + (d.warn && d.warn.length ? '  ' + d.warn.join(' ') : ''), 9000);
-      loadRecs().then(function () { if (S.tab === 'guide') drawGuide(); });
-    }).catch(function (e) { toast('Could not schedule: ' + (e && e.message || e), 8000); });
-  }
-  function loadRecs() {
-    return getJson(API + 'api/rec').then(function (d) { S.recData = d; return d; }).catch(function (e) { S.recErr = e && e.message || String(e); return null; });
-  }
-
-  // ---------- Recordings tab ----------
-  function openRecordings() {
-    showLoading('Loading recordings…');
-    loadRecs().then(function (d) {
-      if (S.tab !== 'recordings') return;
-      if (!d) { $('rows').innerHTML = '<div class="msg big">Cannot load recordings: ' + esc(S.recErr) + '</div>'; return; }
-      recBuild(); renderSide(); showSide(0);
-      if (S.zone !== 'tabs') S.zone = 'rows';
-      focusSide(); focusRow();
-    });
-  }
-  function recBuild() {
-    var d = S.recData, recs = d.recs.filter(function (r) { var c = chanOfUuid(r.uuid); return !c || visible(c); });
-    S.recItems = recs.map(function (r, i) { return { kind: 'rec', i: i, id: r.id, title: r.title, sub: r.sub, desc: r.desc, uuid: r.uuid,
-      chname: r.chname, start: r.start, end: r.end, status: r.status, err: r.err }; });
-    S.ruleItems = d.rules.map(function (r, i) { return { kind: 'rule', i: i, tvg: r.tvg, title: r.title, mode: r.mode, chname: r.chname }; });
-    var by = function (st) { return S.recItems.filter(function (r) { return st.indexOf(r.status) >= 0; }); };
-    var now = by(['recording']), sched = by(['scheduled']), done = by(['recorded', 'failed']).reverse();
-    S.side = [{ kind: 'home', name: 'Home', t: [] }, { kind: 'list', name: '● Recording now', t: now },
-      { kind: 'list', name: 'Scheduled', t: sched }, { kind: 'list', name: 'Recorded', t: done }, { kind: 'list', name: 'Series rules', t: S.ruleItems }];
-    S.rows = [];
-    if (now.length) S.rows.push({ name: '● Recording now', t: now });
-    if (done.length) S.rows.push({ name: 'Recorded', t: done });
-    if (sched.length) S.rows.push({ name: 'Scheduled', t: sched });
-    if (S.ruleItems.length) S.rows.push({ name: 'Series rules', t: S.ruleItems });
-    var disk = d.disk, lim = [];
-    for (var a in d.limits) lim.push('"' + a + '" allows ' + d.limits[a] + ' stream' + (d.limits[a] === 1 ? '' : 's') + ' at a time');
-    var warn = disk.free_gb < 20 ? '  ⚠ Disk almost full: delete recordings.' : '';
-    $('banner').innerHTML = '<b>Disk:</b> ' + disk.free_gb + ' GB free (about ' + disk.hours + ' h of HD)' + esc(warn) +
-      (lim.length ? '<br><b>Provider:</b> ' + esc(lim.join('; ')) + '. While a recording from it runs, its other channels cannot be watched; free channels still work.' : '');
-    $('banner').classList.toggle('warn', !!warn);
-    $('banner').classList.remove('hidden');
-  }
-  function recMenu(r) {
-    var p = S.epos['rec:' + r.id], items = [], sub = day(r.start) + '  ' + hm(r.start) + '–' + hm(r.end) + '  ·  ' + r.chname;
-    if (r.status === 'recorded') {
-      if (p && p[0] > 30 && p[0] < p[1] * 0.95) items.push({ label: '▶ Resume  ' + clockTime(p[0]), act: function () { playRec(r, p[0]); } }, { label: '↺ From the start', act: function () { playRec(r, 0); } });
-      else items.push({ label: '▶ Play', act: function () { playRec(r, 0); } });
-      items.push({ label: '🗑 Delete recording', act: function () { confirmDelete(r); } });
-    } else if (r.status === 'failed') {
-      sub += r.err ? '  ·  ' + r.err : '  ·  the recording failed';
-      items.push({ label: '▶ Try to play what was saved', act: function () { playRec(r, 0); } }, { label: '🗑 Delete', act: function () { recAction('delete', r); } });
-    } else if (r.status === 'recording') {
-      var t = chanOfUuid(r.uuid);
-      if (t) items.push({ label: '▶ Watch live', act: function () { var vi = 0; t.v.forEach(function (v, i) { if (v.id === r.uuid) vi = i; }); S.playList = [t]; S.playIdx = 0; $('player').classList.remove('hidden'); tune(0, vi); } });
-      items.push({ label: '■ Stop recording (keep what is saved)', act: function () { recAction('stop', r); } });
-    } else items.push({ label: '✕ Cancel recording', act: function () { recAction('delete', r); } });
-    items.push({ label: 'Back' });
-    openMenu(r.title, sub, items);
-  }
-  function ruleMenu(r) {
-    openMenu(r.title, (r.mode === 'new' ? 'New episodes only' : 'Every episode') + (r.chname ? ' · ' + r.chname : ''), [
-      { label: '🗑 Stop following (cancels its upcoming recordings)', act: function () {
-        postJson(API + 'api/rec/rule-delete', { tvg: r.tvg, title: r.title }).then(function () { toast('Stopped following ' + r.title + '.'); refreshRecs(); })
-          .catch(function (e) { toast('Failed: ' + (e && e.message || e), 8000); });
-      } }, { label: 'Back' }]);
-  }
-  function confirmDelete(r) {
-    openMenu('Delete "' + r.title + '"?', 'The file is removed from the server.', [{ label: '🗑 Delete', act: function () { recAction('delete', r); } }, { label: 'Keep it' }]);
-  }
-  function recAction(what, r) {
-    postJson(API + 'api/rec/' + what, { id: r.id }).then(function () {
-      toast(what === 'stop' ? 'Recording stopped.' : r.status === 'scheduled' ? 'Recording cancelled.' : 'Deleted.');
-      refreshRecs();
-    }).catch(function (e) { toast('Failed: ' + (e && e.message || e), 8000); });
-  }
-  function refreshRecs() {
-    loadRecs().then(function (d) {
-      if (!d) return;
-      if (S.tab === 'recordings' && !S.menu && $('player').classList.contains('hidden')) redrawBrowse();
-      else if (S.tab === 'guide') drawGuide();
-    });
-  }
-  function playRec(r, at) {
-    playVod(r, { name: r.title, dur: r.end - r.start, year: '' }, null, at);
-  }
 
   // ---------- TV Guide ----------
   function openGuide() {
     if (S.g && S.g.list.length) { drawGuide(); return; }
     $('g-body').innerHTML = '<div class="msg big">Loading the guide…</div>';
-    Promise.all([S.guideIds ? Promise.resolve(S.guideIds) : getJson(API + 'api/guide').then(function (d) { S.guideIds = {}; d.ids.forEach(function (i) { S.guideIds[i] = 1; }); return S.guideIds; }),
-      S.recData ? Promise.resolve() : loadRecs()]).then(function () {
+    (S.guideIds ? Promise.resolve(S.guideIds) : getJson(API + 'api/guide').then(function (d) { S.guideIds = {}; d.ids.forEach(function (i) { S.guideIds[i] = 1; }); return S.guideIds; })).then(function () {
       var seen = {}, list = [];
       tilesOf(S.favs).concat(S.numList, S.T.filter(visible)).forEach(function (t) {
         if (!seen[t.key] && t.tvg && S.guideIds[t.tvg]) { seen[t.key] = 1; list.push(t); }
@@ -980,9 +835,9 @@
       else if (!epg.length) cells = '<div class="g-p muted' + (focus ? ' focus' : '') + '" style="left:0;width:100%">No information</div>';
       else epg.forEach(function (p) {
         if (p[1] <= G.win || p[0] >= G.win + G_SPAN) return;
-        var a = Math.max(p[0], G.win), b = Math.min(p[1], G.win + G_SPAN), rec = recOf(t, p);
+        var a = Math.max(p[0], G.win), b = Math.min(p[1], G.win + G_SPAN);
         cells += '<div class="g-p' + (p === fp ? ' focus' : '') + (p[0] <= now && p[1] > now ? ' live' : '') + '" style="left:' +
-          ((a - G.win) / G_SPAN * 100) + '%;width:' + ((b - a) / G_SPAN * 100) + '%">' + (rec ? '<b class="recdot">●</b>' : '') +
+          ((a - G.win) / G_SPAN * 100) + '%;width:' + ((b - a) / G_SPAN * 100) + '%">' +
           (p[0] < G.win ? '‹ ' : '') + esc(p[2]) + '</div>';
       });
       var num = t.v[0].num;
@@ -994,7 +849,7 @@
     $('g-body').innerHTML = '<div class="g-nowwrap">' + nowLine + '</div>' + rows;
     var ft = G.list[G.row], fp2 = ft && G.epg[ft.tvg] ? gProg(ft, G.t) : null;
     $('g-title').textContent = fp2 ? fp2[2] : ft ? ft.name : '';
-    $('g-time').textContent = fp2 ? day(fp2[0]) + '  ' + hm(fp2[0]) + '–' + hm(fp2[1]) + '  ·  ' + ft.name + (recOf(ft, fp2) ? '  ·  ● recording scheduled' : '') : '';
+    $('g-time').textContent = fp2 ? day(fp2[0]) + '  ' + hm(fp2[0]) + '–' + hm(fp2[1]) + '  ·  ' + ft.name : '';
     $('g-desc').textContent = fp2 ? fp2[3] : '';
     guideEpg();
   }
@@ -1014,8 +869,7 @@
       var pi = fp ? p.indexOf(fp) - 1 : -1;
       if (pi >= 0 && p[pi][1] > now) G.t = Math.max(p[pi][0], now); else if (!fp && G.t - 1800 > now) G.t -= 1800; else return true;
       while (G.t < G.win && G.win - 1800 >= Math.floor(now / 1800) * 1800) G.win -= 1800;
-    } else if (k === KEY.OK) { if (fp) recordMenu(t, fp); else play(G.list, G.row); return true; }
-    else if (isKey(k, KEY.REC)) { if (fp) recordMenu(t, fp); return true; }
+    } else if (k === KEY.OK) { play(G.list, G.row); return true; }
     else if (isKey(k, KEY.BACK)) { toTabs(); drawGuide(); return true; }
     else return false;
     if (G.row < G.top) G.top = G.row; else if (G.row >= G.top + G_ROWS) G.top = G.row - G_ROWS + 1;
@@ -1146,12 +1000,11 @@
     else if (b.ep) playVod(D.item, D.info, b.ep, b.pos || 0);
   }
 
-  // ---------- movie / episode / recording player: the file plays in the <video> element itself ----------
+  // ---------- movie / episode player: the file plays in the <video> element itself ----------
   // A library file the TV cannot play is asked from Jellyfin as an H.264/AAC MP4 transcode ("tc"): that stream
   // starts at a given second (offset) and cannot seek, so a seek reloads it from the new second.
   function vodUrl(v, at) {
     var t = v.item;
-    if (t.kind === 'rec') return API + 'api/rec/file/' + t.id;
     if (t.cat === 'lib') return API + 'api/lib/play/' + (v.ep ? v.ep.uuid : v.info.id) + (v.tc ? '?tc=1&t=' + Math.floor(at || 0) : '');
     return DISPATCHARR + '/proxy/vod/' + (v.ep ? 'episode/' + v.ep.uuid : 'movie/' + v.info.uuid);
   }
@@ -1213,7 +1066,7 @@
       var c = cwOf(S.det.item), at = c && c.ep && S.det.info ? findEp(S.det.info, c.ep.uuid) : null;
       if (at && S.det.zone !== 'eps') { S.det.si = at[0]; S.det.ei = at[1]; }
       drawDetails();
-    } else if (S.tab === 'recordings') redrawBrowse();
+    }
   }
   function seek(d) {
     var v = S.vod, el = $('video'), dur = vodDur(), base = v.seekTo >= 0 ? v.seekTo : curPos();
@@ -1241,7 +1094,7 @@
     if (!v) return;
     var dur = vodDur(), pos = v.seekTo >= 0 ? v.seekTo : curPos();
     $('v-title').textContent = v.info.name;
-    $('v-sub').textContent = v.ep ? epLabel(v.ep) + '  ' + v.ep.title : v.item.kind === 'rec' ? day(v.item.start) + ' ' + hm(v.item.start) + ' · ' + v.item.chname : (v.info.year || '');
+    $('v-sub').textContent = v.ep ? epLabel(v.ep) + '  ' + v.ep.title : (v.info.year || '');
     $('v-bar').style.width = (dur ? Math.min(100, pos / dur * 100) : 0) + '%';
     $('v-pos').textContent = clockTime(pos);
     $('v-dur').textContent = dur ? '-' + clockTime(dur - pos) : '';
@@ -1298,7 +1151,6 @@
     var osdOpen = !$('osd').classList.contains('hidden');
     if (isKey(k, KEY.PLAYPAUSE)) { var vid = $('video'); if (vid.paused) vid.play(); else vid.pause(); return true; }
     if (isKey(k, KEY.STOP)) { closePlayer(); return true; }
-    if (isKey(k, KEY.REC)) { recordFromPlayer(); return true; }
     if (k === KEY.U || isKey(k, KEY.CHUP)) { S.playIdx = (S.playIdx - 1 + S.playList.length) % S.playList.length; tune(350); return true; }
     if (k === KEY.D || isKey(k, KEY.CHDN)) { S.playIdx = (S.playIdx + 1) % S.playList.length; tune(350); return true; }
     if (isKey(k, KEY.FAV)) { toggleFav(S.playing); showOsd(true); return true; }
@@ -1311,7 +1163,6 @@
       var act = osdOpen ? OSD_BTNS[S.osdBtn] : null;
       if (act === 'fav') { toggleFav(S.playing); showOsd(true); return true; }
       if (act === 'ver') { openPicker(); return true; }
-      if (act === 'rec') { recordFromPlayer(); return true; }
       if (act === 'list') { closePlayer(); return true; }
       showOsd(!osdOpen); return true;
     }
@@ -1433,11 +1284,10 @@
   $('q').addEventListener('input', function () { clearTimeout(qTimer); qTimer = setTimeout(runSearch, 300); });
   clock(); setInterval(clock, 10000);
   var ticks = 0;
-  setInterval(function () {                               // every minute: the guide, recordings; every 5: "now playing" lines
+  setInterval(function () {                               // every minute: the guide; every 5: "now playing" lines
     ticks++;
     if (!$('player').classList.contains('hidden') || S.menu || S.pin || S.det) return;
     if (S.tab === 'guide') { drawGuide(); return; }
-    if (S.tab === 'recordings') { refreshRecs(); return; }
     if ((S.tab !== 'live' && S.tab !== 'search') || ticks % 5) return;
     S.epg = {};
     var box = S.tab === 'search' ? $('srows') : (S.side[S.sideIdx] && S.side[S.sideIdx].kind === 'home' ? $('rows') : $('grid'));
@@ -1445,6 +1295,7 @@
     fetchEpg(tiles).then(function () { refreshNow(box); });
   }, 60000);
 
+  if (window.APEXTV_PAGE !== VERSION) window.tvlog('warn', 'index.html ' + window.APEXTV_PAGE + ' with app.js ' + VERSION);
   setTab('live');
   var slow = setTimeout(function () {
     window.tvshow('Still loading... (the server answers slowly or a script failed; see /api/log)');
@@ -1457,8 +1308,7 @@
     S.zone = 'rows'; focusSide(); focusRow();             // start on Home, first row (favorites or last watched)
     clearTimeout(slow);
     $('boot').style.display = 'none';
-    window.tvlog('info', 'ready', { tiles: S.T.length, profile: profile.id, mse: !!(window.mpegts && mpegts.getFeatureList().mseLivePlayback) });
-    loadRecs();                                           // the guide marks scheduled shows; a failure can say "recording busy"
+    window.tvlog('info', 'ready', { app: VERSION, html: window.APEXTV_PAGE || '?', tiles: S.T.length, profile: profile.id, mse: !!(window.mpegts && mpegts.getFeatureList().mseLivePlayback) });
     var skip = false;
     try { skip = sessionStorage.getItem('apextv.noreopen') === '1'; sessionStorage.removeItem('apextv.noreopen'); } catch (e) { /* ignore */ }
     var last = S.byKey[ps.get('last', '')];
