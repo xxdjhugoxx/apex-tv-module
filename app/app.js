@@ -18,7 +18,7 @@
   };
   // A missing element (an index.html from another version, a cached page) must not stop the app: $() then returns
   // a detached stand-in and the remote log says which id was missing.
-  var VERSION = '1.2.4', missing = {};
+  var VERSION = '1.2.5', missing = {};
   window.APEXTV_APP = VERSION;
   var $ = function (id) {
     var el = document.getElementById(id);
