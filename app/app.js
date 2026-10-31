@@ -18,7 +18,7 @@
   };
   // A missing element (an index.html from another version, a cached page) must not stop the app: $() then returns
   // a detached stand-in and the remote log says which id was missing.
-  var VERSION = '1.2.1', missing = {};
+  var VERSION = '1.2.2', missing = {};
   window.APEXTV_APP = VERSION;
   var $ = function (id) {
     var el = document.getElementById(id);
@@ -170,6 +170,11 @@
     S.rows = (cw.length ? [{ name: 'Continue watching', t: cw }] : []).concat(V.rows.map(vis).filter(function (r) { return r.t.length; }));
   }
 
+  function homeMsg() {   // Home of a tab with nothing to show
+    return S.tab === 'library' && VOD.lib && !VOD.lib.items.length
+      ? 'Your Jellyfin (192.168.0.207) is connected but has no movies or shows yet. Add a library in Jellyfin (Dashboard › Libraries › Add Media Library, a folder with your videos): it shows up here within about 5 minutes.'
+      : '';
+  }
   function fetchEpg(tiles) {
     var ids = [], seen = {};
     tiles.forEach(function (t) { if (t && t.tvg && !seen[t.tvg] && !S.epg[t.tvg]) { seen[t.tvg] = 1; ids.push(t.tvg); } });
@@ -422,7 +427,7 @@
     S.sideIdx = i;
     $('rows').classList.toggle('hidden', item.kind !== 'home');
     $('grid').classList.toggle('hidden', item.kind === 'home');
-    if (item.kind === 'home') renderRows('');
+    if (item.kind === 'home') renderRows(homeMsg());
     else { S.list = item.t; S.tileIdx = 0; renderGrid(S.list, item.name === '★ Favorites' ? 'No favorites yet.' : 'Nothing here.'); }
     focusSide();
   }
@@ -598,7 +603,7 @@
     $('rows').classList.toggle('hidden', !home);
     $('grid').classList.toggle('hidden', home);
     if (home) {
-      renderRows('');
+      renderRows(homeMsg());
       S.rowIdx = Math.max(0, S.rows.map(function (r) { return r.name; }).indexOf(rowName));
       S.rowCol = S.rows.map(function (r) { return Math.min(cols[r.name] || 0, Math.max(0, r.t.length - 1)); });
       S.rows.forEach(function (r, ri) { if (S.rowCol[ri] >= ROW_FIRST) fillRow(ri); });
