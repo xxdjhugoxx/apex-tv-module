@@ -18,7 +18,7 @@
   };
   // A missing element (an index.html from another version, a cached page) must not stop the app: $() then returns
   // a detached stand-in and the remote log says which id was missing.
-  var VERSION = '1.2.3', missing = {};
+  var VERSION = '1.2.4', missing = {};
   window.APEXTV_APP = VERSION;
   var $ = function (id) {
     var el = document.getElementById(id);
@@ -71,7 +71,9 @@
   var VOD = { movie: null, series: null, lib: null }, vodWait = {}, vodFailed = {};
 
   function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
-  function norm(s) { return s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
+  // Search keys: lower case, no accents, punctuation as spaces ("Ação", "ACAO" and "ação!" are all "acao").
+  function norm(s) { return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9\u00c0-\u1fff\u2c00-\u2fff\u3040-\uffff]+/g, ' ').trim(); }
+  function keyed(o) { o.nkey = norm(o.name); o.ckey = o.nkey.replace(/ /g, ''); return o; }   // ckey: "globo play" = "globoplay"
   function two(n) { return (n < 10 ? '0' : '') + n; }
   function hm(ts) { var d = new Date(ts * 1000); return two(d.getHours()) + ':' + two(d.getMinutes()); }
   function day(ts) {
@@ -98,8 +100,8 @@
   function load() {
     return fetch(API + 'api/live').then(function (r) { return r.json(); }).then(function (d) {
       S.T = d.tiles.map(function (t, i) {
-        return { kind: 'ch', i: i, key: t[0], name: t[1], logo: t[2], tvg: t[3], brand: t[4], nkey: norm(t[1]), adult: t[6] === 1,
-          v: t[5].map(function (v) { return { id: v[0], label: v[1], num: v[2] }; }) };
+        return keyed({ kind: 'ch', i: i, key: t[0], name: t[1], logo: t[2], tvg: t[3], brand: t[4], adult: t[6] === 1,
+          v: t[5].map(function (v) { return { id: v[0], label: v[1], num: v[2] }; }) });
       });
       S.byKey = {}; S.T.forEach(function (t) { S.byKey[t.key] = t; });
       var pick = function (ids) { return ids.map(function (i) { return S.T[i]; }); };
@@ -122,9 +124,17 @@
       .concat(rec.length ? [{ kind: 'list', name: 'Recently watched', t: rec }] : [])
       .concat([{ kind: 'hdr', name: 'Networks' }], S.nets.map(function (n) { return { kind: 'net', name: n.name, t: vis(n.t) }; }),
         [{ kind: 'hdr', name: 'Provider categories' }], cats);
+    var gp = globoplay();
     S.rows = [{ name: '★ Favorites', t: favs, empty: 'Press ★ (yellow) or F on a channel, or ★ Favorite in the player.' }]
-      .concat(rec.length ? [{ name: 'Recently watched', t: rec }] : [], S.serverRows.map(function (r) { return { name: r.name, t: vis(r.t) }; }));
+      .concat(rec.length ? [{ name: 'Recently watched', t: rec }] : [], gp.length ? [{ name: 'Globoplay', t: gp }] : [], S.serverRows.map(function (r) { return { name: r.name, t: vis(r.t) }; }));
     if (!favs.length && rec.length) S.rows.push(S.rows.shift());   // an empty favorites row goes last, not first
+  }
+  // The Globoplay row of Live Home: the Globoplay live channels, then the Globoplay series and movies the server matched
+  // (vod.py is_globo) once those catalogs are loaded. The Globo channels keep their own network and category rows.
+  function globoplay() {
+    var out = S.T.filter(function (t) { return t.ckey.indexOf('globoplay') >= 0 && visible(t); });
+    ['series', 'movie'].forEach(function (k) { if (VOD[k]) out = out.concat(VOD[k].globo.filter(visible)); });
+    return out;
   }
   function buildNums() {   // number keys, and CH+/CH- after a number: channels in number order
     var seen = {};
@@ -139,15 +149,16 @@
 
   function parseVod(cat, d) {
     var items = d.items.map(function (x, i) {
-      return { kind: cat === 'lib' ? (x[7] === 's' ? 'jseries' : 'jmovie') : cat, cat: cat, i: i, id: x[0], name: x[1], year: x[2],
-        logo: x[3], rating: x[4], tag: x[5], adult: x[6] === 1, nkey: norm(x[1]) };
+      return keyed({ kind: cat === 'lib' ? (x[7] === 's' ? 'jseries' : 'jmovie') : cat, cat: cat, i: i, id: x[0], name: x[1], year: x[2],
+        logo: x[3], rating: x[4], tag: x[5], adult: x[6] === 1 });
     });
     var byId = {}; items.forEach(function (t) { byId[t.id] = t; });
     var cats = d.cats.map(function (c) {
       return c.hdr ? { kind: 'hdr', name: c.hdr } : { kind: 'cat', name: c.name, t: c.t.map(function (i) { return items[i]; }) };
     });
     return { items: items, byId: byId, cats: cats, rows: d.rows.map(function (i) { return cats[i]; }),
-      adult: items.filter(function (t) { return t.adult; }), updated: d.updated, at: Date.now() };
+      adult: items.filter(function (t) { return t.adult; }), globo: (d.globo || []).map(function (i) { return items[i]; }),
+      updated: d.updated, at: Date.now() };
   }
   // My Library grows while the app is open (a download on the PC shows up in Jellyfin within a minute or two): opening
   // the tab, or sitting on it, asks the server again at most once a minute and redraws if the library changed.
@@ -480,8 +491,8 @@
     var tiles = row.querySelectorAll('.tile'), c = S.rowCol[S.rowIdx], el = tiles[c];
     if (el && S.zone === 'rows') el.classList.add('focus');
     if (el) {
-      var w = el.offsetWidth + parseFloat(getComputedStyle(el).marginRight);
-      row.querySelector('.strip').style.transform = 'translateX(' + (-Math.max(0, c - 1) * w) + 'px)';
+      var prev = tiles[Math.max(0, c - 1)];   // offsets, not tile width x index: a row may mix channel and poster tiles
+      row.querySelector('.strip').style.transform = 'translateX(' + (tiles[0].offsetLeft - prev.offsetLeft) + 'px)';
     }
     keepVisible(box, row);
   }
@@ -568,19 +579,25 @@
 
   // ---------- search: channels, movies, series and My Library ----------
   var qTimer = null;
-  function match(list, q, max) {   // names starting with q first, then names containing it
-    var a = [], b = [];
-    for (var i = 0; i < list.length && a.length < max; i++) {
-      if (!visible(list[i])) continue;
-      var at = list[i].nkey.indexOf(q);
-      if (at === 0) a.push(list[i]); else if (at > 0 && b.length < max) b.push(list[i]);
+  // Ranked: the name starts with the query, then a word starts with it, then it is inside the name or every word of it
+  // is (any order, partial words), then it matches with the spaces taken out ("globo play" finds "GLOBOPLAY").
+  function match(list, q, max) {
+    var b = [[], [], [], []], toks = q.split(' '), qc = q.replace(/ /g, '');
+    for (var i = 0; i < list.length && b[0].length < max; i++) {
+      var t = list[i], n = t.nkey, r = -1;
+      if (!visible(t)) continue;
+      if (n.indexOf(q) === 0) r = 0;
+      else if ((' ' + n).indexOf(' ' + q) >= 0) r = 1;
+      else if (n.indexOf(q) > 0 || toks.every(function (w) { return n.indexOf(w) >= 0; })) r = 2;
+      else if (qc.length >= 3 && t.ckey.indexOf(qc) >= 0) r = 3;
+      if (r >= 0 && b[r].length < max) b[r].push(t);
     }
-    return a.concat(b).slice(0, max);
+    return b[0].concat(b[1], b[2], b[3]).slice(0, max);
   }
   function runSearch() {
     var q = norm($('q').value.trim());
     S.rowIdx = 0;
-    if (q.length < 2) { S.rows = []; renderRows('Type at least 2 letters.'); return; }
+    if (q.replace(/ /g, '').length < 2) { S.rows = []; renderRows('Type at least 2 letters.'); return; }
     var rows = [{ name: 'Channels', t: match(S.T, q, 80) }];
     if (VOD.movie) rows.push({ name: 'Movies', t: match(VOD.movie.items, q, 80) });
     if (VOD.series) rows.push({ name: 'Series', t: match(VOD.series.items, q, 80) });
@@ -1330,6 +1347,13 @@
     clearTimeout(slow);
     $('boot').style.display = 'none';
     window.tvlog('info', 'ready', { app: VERSION, html: window.APEXTV_PAGE || '?', tiles: S.T.length, profile: profile.id, mse: !!(window.mpegts && mpegts.getFeatureList().mseLivePlayback) });
+    setTimeout(function () {   // series and movies in the background: the Globoplay row, and an instant search
+      ['series', 'movie'].forEach(function (k) {
+        loadVod(k).then(function (V) {
+          if (V.globo.length && S.tab === 'live' && !S.det && !S.menu && !S.pin && $('player').classList.contains('hidden')) redrawBrowse();
+        }).catch(function () { /* the tab shows the error when opened */ });
+      });
+    }, 8000);
     var skip = false;
     try { skip = sessionStorage.getItem('apextv.noreopen') === '1'; sessionStorage.removeItem('apextv.noreopen'); } catch (e) { /* ignore */ }
     var last = S.byKey[ps.get('last', '')];
