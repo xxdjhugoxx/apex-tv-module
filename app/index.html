@@ -18,17 +18,30 @@
   <div class="brand">APEX<span>TV</span></div>
   <nav id="tabs">
     <div class="tab" data-tab="live">Live TV</div>
+    <div class="tab" data-tab="guide">Guide</div>
     <div class="tab" data-tab="movies">Movies</div>
     <div class="tab" data-tab="series">Series</div>
+    <div class="tab" data-tab="library">My Library</div>
+    <div class="tab" data-tab="recordings">Recordings</div>
     <div class="tab" data-tab="search">Search</div>
+    <div class="tab profile" data-tab="profile" id="tab-profile">👤</div>
   </nav>
   <div id="clock"></div>
 </header>
 
 <main id="view-browse" class="view">
   <aside id="cats"></aside>
-  <section id="rows" class="rows"></section>
-  <section id="grid" class="grid hidden"></section>
+  <div class="main">
+    <div id="banner" class="hidden"></div>
+    <section id="rows" class="rows"></section>
+    <section id="grid" class="grid hidden"></section>
+  </div>
+</main>
+
+<main id="view-guide" class="view hidden">
+  <div id="g-info"><div id="g-title"></div><div id="g-time"></div><div id="g-desc"></div></div>
+  <div id="g-head"><div class="g-chhead">OK: watch or record · ● red: record</div><div id="g-times"></div></div>
+  <div id="g-body"></div>
 </main>
 
 <main id="view-search" class="view hidden">
@@ -74,8 +87,9 @@
     <div class="osd-buttons">
       <div class="btn" data-act="fav" id="btn-fav">★ Favorite</div>
       <div class="btn" data-act="ver" id="btn-ver">Version</div>
+      <div class="btn" data-act="rec">● Record</div>
       <div class="btn" data-act="list">Channel list</div>
-      <div class="hint">▲▼ change channel · OK info · Back list</div>
+      <div class="hint">▲▼ or 0-9 change channel · OK info · Back list</div>
     </div>
   </div>
   <div id="vosd" class="hidden">
@@ -88,6 +102,11 @@
   <div id="picker" class="hidden"><h4>Choose version</h4><div id="picker-list"></div></div>
   <div id="status" class="hidden"></div>
 </div>
+
+<div id="menu" class="hidden"><h4 id="menu-title"></h4><div id="menu-sub"></div><div id="menu-list"></div></div>
+<div id="pin" class="hidden"><h4 id="pin-title"></h4><div id="pin-dots"></div><div id="pin-pad"></div><div id="pin-msg"></div></div>
+<div id="numbox" class="hidden"></div>
+<div id="toast" class="hidden"></div>
 
 <script src="vendor/mpegts.js"></script>
 <script src="app.js"></script>

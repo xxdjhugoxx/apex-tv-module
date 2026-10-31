@@ -145,3 +145,64 @@ body { background: #0b0b0f; color: #f2f2f5; font-family: "Samsung One", "Roboto"
 .v-times { display: flex; justify-content: space-between; font-size: 1.05rem; margin-top: .55rem; color: #d0d0d8; }
 #v-state { font-weight: 800; color: #fff; }
 #vosd .hint { margin-top: .8rem; text-align: right; }
+
+/* v1.2: tab bar with 8 tabs, browse column with a banner */
+.tab { font-size: 1.02rem; padding: .45rem .8rem; margin-right: .2rem; }
+.tab.profile { margin-left: 1rem; color: #d0d0d8; }
+#view-browse .main { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
+#view-browse .main .rows, #view-browse .main .grid { flex: 1 1 auto; }
+#banner { margin: .3rem 1.2rem .6rem; padding: .6rem 1rem; border-radius: .5rem; background: #17171f; font-size: .95rem; color: #c8c8d0; line-height: 1.45; }
+#banner.warn { background: #3a1416; color: #ffd3d6; }
+
+/* recordings */
+.tile.rec .art .ph { font-size: 1rem; color: #8c8c99; padding: .5rem; text-align: center; }
+.tile.rec .art .ph.big { font-size: 3rem; color: #e50914; }
+.tile.rec .rs { left: auto; right: .45rem; }
+.tile.recording .rs { background: #e50914; color: #fff; }
+.tile.failed .rs { background: #6b6b75; color: #fff; }
+
+/* TV Guide */
+#view-guide { flex-direction: column; padding: 0 2rem 1rem; }
+#g-info { flex: 0 0 auto; height: 7.6rem; padding: .3rem 0 .6rem; overflow: hidden; }
+#g-title { font-size: 1.7rem; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#g-time { font-size: 1rem; color: #b5b5c0; margin: .25rem 0 .35rem; }
+#g-desc { font-size: .95rem; color: #8c8c99; max-height: 2.7rem; overflow: hidden; }
+#g-head { display: flex; flex: 0 0 auto; height: 1.8rem; }
+.g-chhead { width: 15rem; flex: 0 0 auto; font-size: .78rem; color: #6f6f7c; padding-top: .3rem; }
+#g-times { position: relative; flex: 1 1 auto; }
+#g-times span { position: absolute; top: .2rem; font-size: .9rem; font-weight: 700; color: #b9b9c4; padding-left: .3rem; border-left: .1rem solid #34343f; }
+#g-body { position: relative; flex: 1 1 auto; overflow: hidden; }
+.g-nowwrap { position: absolute; left: 15rem; right: 0; top: 0; bottom: 0; pointer-events: none; z-index: 2; }
+.g-now { position: absolute; top: 0; bottom: 0; width: .15rem; background: #e50914; }
+.g-row { display: flex; height: 4.4rem; margin-bottom: .3rem; }
+.g-ch { width: 15rem; flex: 0 0 auto; display: flex; align-items: center; background: #17171f; border-radius: .4rem; margin-right: .3rem; padding: 0 .6rem; overflow: hidden; }
+.g-row.focus .g-ch { background: #23232e; }
+.g-num { font-size: .85rem; font-weight: 800; color: #e50914; margin-right: .5rem; }
+.g-ch img { max-width: 3.4rem; max-height: 2.6rem; margin-right: .5rem; }
+.g-name { font-size: .95rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.g-line { position: relative; flex: 1 1 auto; }
+.g-p { position: absolute; top: 0; bottom: 0; background: #1b1b24; border: .1rem solid #0b0b0f; border-radius: .35rem; padding: .5rem .6rem; font-size: .95rem; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #d6d6de; }
+.g-p.live { background: #22222e; }
+.g-p.focus { background: #fff; color: #000; z-index: 1; }
+.g-p.muted { color: #6f6f7c; }
+.recdot { color: #e50914; margin-right: .3rem; }
+
+/* popup menu, PIN pad, channel number, toast */
+#menu, #pin { position: fixed; left: 50%; top: 50%; -webkit-transform: translate(-50%, -50%); transform: translate(-50%, -50%); z-index: 30;
+  background: rgba(18,18,26,.98); border: .12rem solid #33333f; border-radius: .8rem; padding: 1.4rem 1.6rem; min-width: 30rem; max-width: 60rem; box-shadow: 0 1rem 4rem rgba(0,0,0,.8); }
+#menu h4, #pin h4 { font-size: 1.4rem; font-weight: 800; margin-bottom: .3rem; }
+#menu-sub { font-size: .95rem; color: #9a9aa6; margin-bottom: .9rem; }
+.mi { font-size: 1.15rem; font-weight: 600; padding: .6rem 1rem; border-radius: .4rem; }
+.mi.focus { background: #fff; color: #000; }
+#pin { min-width: 22rem; text-align: center; }
+#pin-dots { margin: .8rem 0 1rem; }
+#pin-dots i { display: inline-block; width: 1.1rem; height: 1.1rem; border-radius: 50%; border: .15rem solid #b9b9c4; margin: 0 .5rem; }
+#pin-dots i.on { background: #fff; border-color: #fff; }
+#pin-pad { width: 15rem; margin: 0 auto; overflow: hidden; }
+.pk { float: left; width: 4.4rem; height: 3.4rem; line-height: 3.4rem; margin: .25rem; border-radius: .4rem; background: #23232e; font-size: 1.4rem; font-weight: 700; }
+.pk.focus { background: #fff; color: #000; }
+#pin-msg { clear: both; font-size: .95rem; color: #ff9aa2; min-height: 1.3rem; padding-top: .6rem; }
+#numbox { position: fixed; right: 3rem; top: 2rem; z-index: 40; font-size: 3rem; font-weight: 900; background: rgba(0,0,0,.8); padding: .4rem 1.4rem; border-radius: .6rem; color: #fff; }
+#toast { position: fixed; left: 50%; bottom: 3rem; -webkit-transform: translateX(-50%); transform: translateX(-50%); z-index: 40; max-width: 70%;
+  background: rgba(30,30,40,.97); border-left: .3rem solid #e50914; padding: .9rem 1.4rem; border-radius: .5rem; font-size: 1.1rem; line-height: 1.4; }

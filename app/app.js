@@ -1,14 +1,17 @@
 /* APEX TV front end. Plain ES2017 without ?. or ?? so Tizen 4+ (Chromium 56) and webOS run it.
-   Remote: arrows, OK (Enter), Back (Tizen 10009, webOS 461, Esc, Backspace outside the search box).
+   Remote: arrows, OK (Enter), Back (Tizen 10009, webOS 461, Esc, Backspace outside the search box), 0-9, red = record.
    Live: one tile per channel; its versions (4K/FHD/HD/SD/H265) come best first from the server. OK plays the best
    version and falls back to the next one if it fails. Live video comes straight from Dispatcharr's MPEG-TS
    proxy and plays through mpegts.js (MSE).
-   Movies / Series: posters by category from /api/vod, a details page (seasons and episodes for a series) and
-   MP4 played by the <video> element itself from Dispatcharr's VOD proxy, with seeking and Continue watching. */
+   Guide: channels x time from the server's EPG; OK plays or records (Dispatcharr DVR through the server).
+   Movies / Series / My Library: posters by category, a details page (seasons and episodes for a series) and MP4/MKV
+   played by the <video> element itself (Dispatcharr's VOD proxy, or the server's relay for Jellyfin and recordings).
+   Profiles (Hugo, Wife, Kids) keep their own favorites, recent, Continue watching and last channel on this device.
+   Adult content stays hidden until the PIN is entered; the Kids profile never shows it and needs the PIN to leave. */
 (function () {
   'use strict';
   var KEY = { L: 37, U: 38, R: 39, D: 40, OK: 13, CHUP: [427, 33], CHDN: [428, 34], BACK: [10009, 461, 27, 8], FAV: [405, 70], INFO: [457, 73],
-    PLAYPAUSE: [10252, 415, 19], STOP: [413], FF: [417], RW: [412] };
+    PLAYPAUSE: [10252, 415, 19], STOP: [413], FF: [417], RW: [412], REC: [403, 82, 416] };
   var store = {
     get: function (k, d) { try { var v = localStorage.getItem('apextv.' + k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
     set: function (k, v) { try { localStorage.setItem('apextv.' + k, JSON.stringify(v)); } catch (e) { /* private mode: keep in memory only */ } }
@@ -18,47 +21,77 @@
   // window.APEXTV_API / APEXTV_DISPATCHARR to the LAN server before this script.
   var API = window.APEXTV_API || '';
   var DISPATCHARR = window.APEXTV_DISPATCHARR || ('http://' + location.hostname + ':9191');
-  var TABS = ['live', 'movies', 'series', 'search'];
+  var TABS = ['live', 'guide', 'movies', 'series', 'library', 'recordings', 'search', 'profile'];
+  var VODTAB = { movies: 'movie', series: 'series', library: 'lib' };
   var ROW_FIRST = 14;           // tiles drawn per row before the row gets focus
   var GRID_STEP = 120;          // tiles drawn per step in a grid (a movie category has up to 2500)
   var START_MS = 25000;         // a live version may take this long to show its first frame while Dispatcharr connects
   var STALL_MS = 10000;         // once playing, this long without a new frame is a failure
+  var G_SPAN = 7200, G_ROWS = 8;  // the Guide shows 2 hours and 8 channels at a time
+
+  // ---------- profiles (this device) ----------
+  var PROFILES = [{ id: 'hugo', name: 'Hugo' }, { id: 'wife', name: 'Wife' }, { id: 'kids', name: 'Kids', kids: true }];
+  if (!store.get('migrated12', 0)) {   // 1.1 kept one set of favorites etc.: it becomes Hugo's
+    ['favs2', 'recent2', 'cw', 'epos'].forEach(function (k) { var v = store.get(k, null); if (v !== null) store.set('hugo.' + k, v); });
+    store.set('migrated12', 1);
+  }
+  var profile = PROFILES.filter(function (p) { return p.id === store.get('profile', 'hugo'); })[0] || PROFILES[0];
+  var ps = {
+    get: function (k, d) { return store.get(profile.id + '.' + k, d); },
+    set: function (k, v) { store.set(profile.id + '.' + k, v); }
+  };
 
   // Browse state of the tab on screen. The VIEW fields are swapped with CTX[tab] when the tab changes,
   // so each tab keeps its own sidebar, rows and focus.
   var VIEW = ['side', 'rows', 'list', 'sideIdx', 'rowIdx', 'rowCol', 'rowFull', 'tileIdx', 'gridShown'];
   function fresh() { return { side: [], rows: [], list: [], sideIdx: 0, rowIdx: 0, rowCol: [], rowFull: {}, tileIdx: 0, gridShown: 0 }; }
-  var CTX = { live: fresh(), movies: fresh(), series: fresh(), search: fresh() };
+  var CTX = {}; TABS.forEach(function (t) { CTX[t] = fresh(); });
   var S = {
-    T: [], byKey: {}, cats: [], nets: [],
-    favs: store.get('favs2', []), recent: store.get('recent2', []), pref: store.get('ver', {}),
-    cw: store.get('cw', []), epos: store.get('epos', {}),
+    T: [], byKey: {}, cats: [], nets: [], numList: [], byNum: {},
+    favs: ps.get('favs2', []), recent: ps.get('recent2', []), pref: store.get('ver', {}),
+    cw: ps.get('cw', []), epos: ps.get('epos', {}), unlocked: false,
     tab: 'live', zone: 'side', tabIdx: 0, epg: {},
     playing: null, playList: [], playIdx: 0, vIdx: 0, bad: {}, player: null, loadTimer: null, osdTimer: null,
-    osdBtn: -1, picker: false, pickIdx: 0, watch: null, vod: null, det: null
+    osdBtn: -1, picker: false, pickIdx: 0, watch: null, vod: null, det: null, menu: null, pin: null,
+    g: null, guideIds: null, recData: null, recItems: [], ruleItems: [], num: ''
   };
   var k0 = fresh(); for (var f in k0) S[f] = k0[f];
-  var VOD = { movie: null, series: null }, vodWait = {}, vodFailed = {};
+  var VOD = { movie: null, series: null, lib: null }, vodWait = {}, vodFailed = {};
 
   function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
   function norm(s) { return s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
   function two(n) { return (n < 10 ? '0' : '') + n; }
   function hm(ts) { var d = new Date(ts * 1000); return two(d.getHours()) + ':' + two(d.getMinutes()); }
+  function day(ts) {
+    var d = new Date(ts * 1000), t = new Date(), y = new Date(Date.now() - 864e5), m = new Date(Date.now() + 864e5);
+    if (d.toDateString() === t.toDateString()) return 'Today';
+    if (d.toDateString() === m.toDateString()) return 'Tomorrow';
+    if (d.toDateString() === y.toDateString()) return 'Yesterday';
+    return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()] + ' ' + d.getDate() + '/' + (d.getMonth() + 1);
+  }
   function clockTime(s) { s = Math.max(0, Math.floor(s || 0)); var h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60; return (h ? h + ':' + two(m) : m) + ':' + two(s % 60); }
   function runtime(s) { var m = Math.round((s || 0) / 60); return m >= 60 ? Math.floor(m / 60) + ' h ' + two(m % 60) + ' min' : m + ' min'; }
   function isKey(code, list) { return list.indexOf(code) >= 0; }
-  function tilesOf(keys) { return keys.map(function (k) { return S.byKey[k]; }).filter(Boolean); }
+  function digitOf(k) { return k >= 48 && k <= 57 ? k - 48 : k >= 96 && k <= 105 ? k - 96 : -1; }
+  function tilesOf(keys) { return keys.map(function (k) { return S.byKey[k]; }).filter(function (t) { return t && visible(t); }); }
   function getJson(url) {
     return fetch(url).then(function (r) {
       return r.json().then(function (d) { if (!r.ok) throw new Error(d && d.error || 'HTTP ' + r.status); return d; });
     });
   }
+  function postJson(url, body) {   // text/plain: a "simple" request, no CORS preflight
+    return fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify(body) }).then(function (r) {
+      return r.json().then(function (d) { if (!r.ok) throw new Error(d && d.error || 'HTTP ' + r.status); return d; });
+    });
+  }
+  function apiPath(p) { return (API ? API.replace(/\/$/, '') : '') + p; }
+  function visible(t) { return !t.adult || (S.unlocked && !profile.kids); }
 
   // ---------- data ----------
   function load() {
     return fetch(API + 'api/live').then(function (r) { return r.json(); }).then(function (d) {
       S.T = d.tiles.map(function (t, i) {
-        return { kind: 'ch', i: i, key: t[0], name: t[1], logo: t[2], tvg: t[3], brand: t[4], nkey: norm(t[1]),
+        return { kind: 'ch', i: i, key: t[0], name: t[1], logo: t[2], tvg: t[3], brand: t[4], nkey: norm(t[1]), adult: t[6] === 1,
           v: t[5].map(function (v) { return { id: v[0], label: v[1], num: v[2] }; }) };
       });
       S.byKey = {}; S.T.forEach(function (t) { S.byKey[t.key] = t; });
@@ -70,43 +103,64 @@
     });
   }
 
-  function build() {   // the Live tab's sidebar and Home rows
-    var favs = tilesOf(S.favs), rec = tilesOf(S.recent);
+  function build() {   // the Live tab's sidebar and Home rows, without what this profile may not see
+    var favs = tilesOf(S.favs), rec = tilesOf(S.recent), vis = function (l) { return l.filter(visible); };
+    var cats = [];
+    S.cats.forEach(function (c) {
+      var t = vis(c.t);
+      if (t.length) cats.push({ kind: 'cat', name: c.name, t: t });
+      else if (c.t.length && !profile.kids) cats.push({ kind: 'locked', name: '🔒 ' + c.name, t: [], real: c.name });
+    });
     S.side = [{ kind: 'home', name: 'Home', t: [] }, { kind: 'list', name: '★ Favorites', t: favs }]
       .concat(rec.length ? [{ kind: 'list', name: 'Recently watched', t: rec }] : [])
-      .concat([{ kind: 'hdr', name: 'Networks' }], S.nets, [{ kind: 'hdr', name: 'Provider categories' }], S.cats);
+      .concat([{ kind: 'hdr', name: 'Networks' }], S.nets.map(function (n) { return { kind: 'net', name: n.name, t: vis(n.t) }; }),
+        [{ kind: 'hdr', name: 'Provider categories' }], cats);
     S.rows = [{ name: '★ Favorites', t: favs, empty: 'Press ★ (yellow) or F on a channel, or ★ Favorite in the player.' }]
-      .concat(rec.length ? [{ name: 'Recently watched', t: rec }] : [], S.serverRows);
+      .concat(rec.length ? [{ name: 'Recently watched', t: rec }] : [], S.serverRows.map(function (r) { return { name: r.name, t: vis(r.t) }; }));
     if (!favs.length && rec.length) S.rows.push(S.rows.shift());   // an empty favorites row goes last, not first
   }
+  function buildNums() {   // number keys, and CH+/CH- after a number: channels in number order
+    var seen = {};
+    S.byNum = {};
+    S.T.forEach(function (t) {
+      if (!visible(t)) return;
+      t.v.forEach(function (v, vi) { var n = parseInt(v.num, 10); if (n > 0 && !S.byNum[n]) S.byNum[n] = { t: t, v: vi }; });
+    });
+    S.numList = Object.keys(S.byNum).map(Number).sort(function (a, b) { return a - b; })
+      .map(function (n) { return S.byNum[n].t; }).filter(function (t) { if (seen[t.key]) return false; seen[t.key] = 1; return true; });
+  }
 
-  function loadVod(kind) {
-    if (VOD[kind]) return Promise.resolve(VOD[kind]);
-    if (!vodWait[kind]) {
-      vodWait[kind] = getJson(API + 'api/vod?kind=' + kind).then(function (d) {
+  function loadVod(cat) {
+    if (VOD[cat]) return Promise.resolve(VOD[cat]);
+    if (!vodWait[cat]) {
+      vodWait[cat] = getJson(API + (cat === 'lib' ? 'api/lib' : 'api/vod?kind=' + cat)).then(function (d) {
         var items = d.items.map(function (x, i) {
-          return { kind: kind, i: i, id: x[0], name: x[1], year: x[2], logo: x[3], rating: x[4], tag: x[5], nkey: norm(x[1]) };
+          return { kind: cat === 'lib' ? (x[7] === 's' ? 'jseries' : 'jmovie') : cat, cat: cat, i: i, id: x[0], name: x[1], year: x[2],
+            logo: x[3], rating: x[4], tag: x[5], adult: x[6] === 1, nkey: norm(x[1]) };
         });
         var byId = {}; items.forEach(function (t) { byId[t.id] = t; });
         var cats = d.cats.map(function (c) {
           return c.hdr ? { kind: 'hdr', name: c.hdr } : { kind: 'cat', name: c.name, t: c.t.map(function (i) { return items[i]; }) };
         });
-        VOD[kind] = { items: items, byId: byId, cats: cats, rows: d.rows.map(function (i) { return cats[i]; }) };
-        vodFailed[kind] = false;
-        return VOD[kind];
+        VOD[cat] = { items: items, byId: byId, cats: cats, rows: d.rows.map(function (i) { return cats[i]; }),
+          adult: items.filter(function (t) { return t.adult; }) };
+        vodFailed[cat] = false;
+        return VOD[cat];
       }).catch(function (e) {
-        vodWait[kind] = null; vodFailed[kind] = true;
-        window.tvlog('error', kind + ' catalog failed: ' + (e && e.message || e));
+        vodWait[cat] = null; vodFailed[cat] = true;
+        if (!/not configured/.test(e && e.message)) window.tvlog('error', cat + ' catalog failed: ' + (e && e.message || e));
         throw e;
       });
     }
-    return vodWait[kind];
+    return vodWait[cat];
   }
-  function tabKind(tab) { return tab === 'movies' ? 'movie' : 'series'; }
-  function vodBuild(tab) {   // a Movies or Series tab: Home (Continue watching + category rows), then the categories
-    var V = VOD[tabKind(tab)], cw = cwItems(tabKind(tab));
-    S.side = [{ kind: 'home', name: 'Home', t: [] }].concat(cw.length ? [{ kind: 'list', name: 'Continue watching', t: cw }] : [], V.cats);
-    S.rows = (cw.length ? [{ name: 'Continue watching', t: cw }] : []).concat(V.rows);
+  function vodBuild(tab) {   // a Movies, Series or Library tab: Home (Continue watching + rows), then the categories
+    var cat = VODTAB[tab], V = VOD[cat], cw = cwItems(cat), locked = V.adult.length && !(S.unlocked && !profile.kids);
+    var vis = function (c) { return locked ? { kind: c.kind, name: c.name, t: c.t.filter(visible) } : c; };
+    var cats = V.cats.map(function (c) { return c.kind === 'hdr' ? c : vis(c); }).filter(function (c) { return c.kind === 'hdr' || c.t.length; });
+    if (V.adult.length && !profile.kids) cats.push(locked ? { kind: 'locked', name: '🔒 Adult', t: [], real: 'Adult' } : { kind: 'cat', name: 'Adult', t: V.adult });
+    S.side = [{ kind: 'home', name: 'Home', t: [] }].concat(cw.length ? [{ kind: 'list', name: 'Continue watching', t: cw }] : [], cats);
+    S.rows = (cw.length ? [{ name: 'Continue watching', t: cw }] : []).concat(V.rows.map(vis).filter(function (r) { return r.t.length; }));
   }
 
   function fetchEpg(tiles) {
@@ -128,39 +182,46 @@
   }
   function pct(p) { var t = Date.now() / 1000; return Math.max(0, Math.min(100, (t - p[0]) / (p[1] - p[0]) * 100)); }
 
-  // ---------- Continue watching (this device only) ----------
-  // S.cw: newest first, one entry per movie or series: {k, kind, id, pos, dur, at, ep: {uuid, s, e, title} for a series}.
-  // S.epos: position per episode uuid [pos, dur], for the bars in the episode list.
+  // ---------- Continue watching (this profile, this device) ----------
+  // S.cw: newest first, one entry per movie or series: {k, cat, kind, id, pos, dur, at, ep: {uuid, s, e, title} for a series}.
+  // S.epos: position per episode uuid (or 'rec:<id>' for a recording) [pos, dur], for the progress bars.
   function cwOf(t) { var k = t.kind + ':' + t.id; for (var i = 0; i < S.cw.length; i++) if (S.cw[i].k === k) return S.cw[i]; return null; }
-  function cwItems(kind) {
-    var V = VOD[kind];
-    return V ? S.cw.filter(function (e) { return e.kind === kind; }).map(function (e) { return V.byId[e.id]; }).filter(Boolean) : [];
+  function cwItems(cat) {
+    var V = VOD[cat];
+    return V ? S.cw.filter(function (e) { return (e.cat || e.kind) === cat; }).map(function (e) { return V.byId[e.id]; })
+      .filter(function (t) { return t && visible(t); }) : [];
   }
+  function isSeries(t) { return t.kind === 'series' || t.kind === 'jseries'; }
   function cwSave(ended) {
-    var v = S.vod, el = $('video');
+    var v = S.vod;
     if (!v || !v.started) return;
-    var pos = ended ? vodDur() : (v.seekTo >= 0 ? v.seekTo : el.currentTime || 0), dur = vodDur();
+    var dur = vodDur(), pos = ended ? dur : (v.seekTo >= 0 ? v.seekTo : curPos());
     var t = v.item, k = t.kind + ':' + t.id, done = ended || (dur > 0 && pos > dur * 0.95), entry = null;
-    if (v.ep) {
-      S.epos[v.ep.uuid] = [Math.floor(done ? dur : pos), Math.floor(dur)];
+    if (t.kind === 'rec' || v.ep) {
+      S.epos[t.kind === 'rec' ? 'rec:' + t.id : v.ep.uuid] = [Math.floor(done ? dur : pos), Math.floor(dur)];
       var ks = Object.keys(S.epos); if (ks.length > 600) ks.slice(0, ks.length - 500).forEach(function (x) { delete S.epos[x]; });
-      store.set('epos', S.epos);
+      ps.set('epos', S.epos);
+      if (t.kind === 'rec') return;
       var nx = done ? nextEp(v) : v.ep;
       if (nx && (done || pos >= 30)) entry = { ep: { uuid: nx.uuid, s: nx.s, e: nx.e, title: nx.title }, pos: done ? 0 : Math.floor(pos), dur: done ? nx.dur : Math.floor(dur) };
       if (!entry && !done) return;            // a few seconds of another episode: keep the old place
     } else if (!done && pos >= 30) entry = { pos: Math.floor(pos), dur: Math.floor(dur) };
     S.cw = S.cw.filter(function (e) { return e.k !== k; });
-    if (entry) { entry.k = k; entry.kind = t.kind; entry.id = t.id; entry.at = Date.now(); S.cw.unshift(entry); }
+    if (entry) { entry.k = k; entry.kind = t.kind; entry.cat = t.cat; entry.id = t.id; entry.at = Date.now(); S.cw.unshift(entry); }
     S.cw = S.cw.slice(0, 40);
-    store.set('cw', S.cw);
+    ps.set('cw', S.cw);
   }
 
   // ---------- tiles ----------
-  function tileHtml(t) { return t.kind === 'ch' ? chanHtml(t) : posterHtml(t); }
-  function dataK(t) { return (t.kind === 'ch' ? 'c' : t.kind === 'movie' ? 'm' : 's') + ':' + t.i; }
+  function tileHtml(t) {
+    return t.kind === 'ch' ? chanHtml(t) : t.kind === 'rec' ? recHtml(t) : t.kind === 'rule' ? ruleHtml(t) : posterHtml(t);
+  }
+  function dataK(t) {
+    return t.kind === 'ch' ? 'c:' + t.i : t.kind === 'rec' ? 'r:' + t.i : t.kind === 'rule' ? 'u:' + t.i : 'v:' + t.cat + ':' + t.i;
+  }
   function itemOf(el) {
-    var k = el.getAttribute('data-k').split(':'), i = +k[1];
-    return k[0] === 'c' ? S.T[i] : VOD[k[0] === 'm' ? 'movie' : 'series'].items[i];
+    var k = el.getAttribute('data-k').split(':');
+    return k[0] === 'c' ? S.T[+k[1]] : k[0] === 'r' ? S.recItems[+k[1]] : k[0] === 'u' ? S.ruleItems[+k[1]] : VOD[k[1]].items[+k[2]];
   }
   function chanHtml(t) {
     var p = nowProg(t), fav = S.favs.indexOf(t.key) >= 0, best = t.v[0];
@@ -171,8 +232,8 @@
       '</div><div class="meta"><div class="name">' + esc(t.name) + '</div><div class="now">' + (p && p.now ? esc(p.now[2]) : '') + '</div>' +
       '<div class="bar"><i style="width:' + (p && p.now ? pct(p.now) : 0) + '%"></i></div></div></div>';
   }
-  function posterUrl(t) { return DISPATCHARR + '/api/vod/vodlogos/' + t.logo + '/cache/'; }
-  function imgUrl(p) { return !p ? '' : /^https?:/.test(p) ? p : DISPATCHARR + p; }
+  function posterUrl(t) { return t.cat === 'lib' ? apiPath('/api/lib/img/' + t.id) : DISPATCHARR + '/api/vod/vodlogos/' + t.logo + '/cache/'; }
+  function imgUrl(p) { return !p ? '' : /^https?:/.test(p) ? p : /^\/api\/lib\//.test(p) ? apiPath(p) : DISPATCHARR + p; }
   function posterHtml(t) {
     var c = cwOf(t), p = c && c.dur ? Math.min(100, c.pos / c.dur * 100) : 0;
     var sub = c && c.ep ? 'S' + c.ep.s + ' E' + c.ep.e + (c.pos ? ' · ' + clockTime(c.pos) : ' · next')
@@ -181,6 +242,20 @@
       (t.logo ? '<img data-src="' + esc(posterUrl(t)) + '" alt="">' : '') + (t.tag ? '<span class="vers">' + esc(t.tag) + '</span>' : '') +
       '</div><div class="meta"><div class="name">' + esc(t.name) + '</div><div class="now">' + esc(sub) + '</div>' +
       (p ? '<div class="bar"><i style="width:' + p + '%"></i></div>' : '') + '</div></div>';
+  }
+  var REC_LABEL = { recording: '● REC', scheduled: 'Scheduled', recorded: '', failed: 'Failed' };
+  function recHtml(r) {
+    var ch = chanOfUuid(r.uuid), p = S.epos['rec:' + r.id], w = p && p[1] ? Math.min(100, p[0] / p[1] * 100) : 0;
+    return '<div class="tile rec ' + r.status + '" data-k="' + dataK(r) + '"><div class="art">' +
+      (ch && ch.logo ? '<img data-src="' + esc(ch.logo) + '" alt="">' : '<span class="ph">' + esc(r.chname) + '</span>') +
+      (REC_LABEL[r.status] ? '<span class="num rs">' + REC_LABEL[r.status] + '</span>' : '') + '</div>' +
+      '<div class="meta"><div class="name">' + esc(r.title) + '</div><div class="now">' + esc(day(r.start) + ' ' + hm(r.start) + '–' + hm(r.end) + ' · ' + (ch ? ch.name : r.chname)) + '</div>' +
+      '<div class="bar"><i style="width:' + (r.status === 'recording' ? pct([r.start, r.end]) : w) + '%"></i></div></div></div>';
+  }
+  function ruleHtml(r) {
+    return '<div class="tile rec rule" data-k="' + dataK(r) + '"><div class="art"><span class="ph big">⟳</span></div><div class="meta">' +
+      '<div class="name">' + esc(r.title) + '</div><div class="now">' + (r.mode === 'new' ? 'New episodes' : 'Every episode') +
+      (r.chname ? ' · ' + esc(r.chname) : '') + '</div><div class="bar"><i style="width:0"></i></div></div></div>';
   }
   var io = 'IntersectionObserver' in window ? new IntersectionObserver(function (es) {
     es.forEach(function (e) { if (e.isIntersecting) { var im = e.target; im.src = im.getAttribute('data-src'); io.unobserve(im); } });
@@ -206,22 +281,133 @@
     if (top - pad < box.scrollTop) box.scrollTop = Math.max(0, top - pad);
     else if (top + el.offsetHeight + pad > box.scrollTop + box.clientHeight) box.scrollTop = top + el.offsetHeight + pad - box.clientHeight;
   }
-  function activate(list, i) {   // OK on a tile: a channel plays, a movie or series opens its page
+  function activate(list, i) {   // OK on a tile
     var t = list[i];
     if (!t) return;
-    if (t.kind === 'ch') play(list, i); else openDetails(t);
+    if (t.kind === 'ch') play(list, i);
+    else if (t.kind === 'rec') recMenu(t);
+    else if (t.kind === 'rule') ruleMenu(t);
+    else openDetails(t);
+  }
+
+  // ---------- toast, popup menu, PIN pad ----------
+  var toastTimer = null;
+  function toast(msg, ms) {
+    $('toast').textContent = msg; $('toast').classList.remove('hidden');
+    clearTimeout(toastTimer); toastTimer = setTimeout(function () { $('toast').classList.add('hidden'); }, ms || 5000);
+  }
+  function openMenu(title, sub, items) {   // items: [{label, act}]
+    S.menu = { items: items, idx: 0 };
+    $('menu-title').textContent = title; $('menu-sub').textContent = sub || '';
+    $('menu').classList.remove('hidden');
+    drawMenu();
+  }
+  function drawMenu() {
+    $('menu-list').innerHTML = S.menu.items.map(function (m, i) { return '<div class="mi' + (i === S.menu.idx ? ' focus' : '') + '">' + esc(m.label) + '</div>'; }).join('');
+  }
+  function closeMenu() { S.menu = null; $('menu').classList.add('hidden'); }
+  function menuKey(k) {
+    var M = S.menu, n = M.items.length;
+    if (k === KEY.U) M.idx = (M.idx - 1 + n) % n;
+    else if (k === KEY.D) M.idx = (M.idx + 1) % n;
+    else if (k === KEY.OK) { var m = M.items[M.idx]; closeMenu(); if (m.act) m.act(); return true; }
+    else if (isKey(k, KEY.BACK)) { closeMenu(); return true; }
+    else return true;
+    drawMenu(); return true;
+  }
+
+  // A 4-digit PIN for adult content, kept on this device as a hash (a parental lock, not a password).
+  function pinHash(p) { var h = 2166136261; p = 'apextv:' + p; for (var i = 0; i < p.length; i++) { h ^= p.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } return h.toString(16); }
+  var PAD = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '⌫', '0', '✕'];
+  function askPin(why, ok, forceNew) {
+    var hasPin = !!store.get('pin', '') && !forceNew;
+    S.pin = { why: why, ok: ok, val: '', idx: 4, step: hasPin ? 'check' : 'new', first: '' };
+    $('pin').classList.remove('hidden');
+    drawPin(hasPin ? '' : 'Choose a 4-digit PIN for adult content and the Kids profile.');
+  }
+  function drawPin(msg) {
+    var P = S.pin;
+    $('pin-title').textContent = P.step === 'check' ? P.why : P.step === 'new' ? 'New PIN' : 'Repeat the new PIN';
+    $('pin-dots').innerHTML = [0, 1, 2, 3].map(function (i) { return '<i' + (i < P.val.length ? ' class="on"' : '') + '></i>'; }).join('');
+    $('pin-pad').innerHTML = PAD.map(function (d, i) { return '<div class="pk' + (i === P.idx ? ' focus' : '') + '">' + d + '</div>'; }).join('');
+    if (msg !== undefined) $('pin-msg').textContent = msg;
+  }
+  function closePin() { S.pin = null; $('pin').classList.add('hidden'); }
+  function pinDigit(d) {
+    var P = S.pin;
+    if (P.val.length >= 4) return;
+    P.val += d;
+    drawPin();
+    if (P.val.length < 4) return;
+    setTimeout(function () {
+      if (S.pin !== P) return;
+      if (P.step === 'check') {
+        if (pinHash(P.val) === store.get('pin', '')) { closePin(); P.ok(); }
+        else { P.val = ''; drawPin('Wrong PIN.'); }
+      } else if (P.step === 'new') { P.first = P.val; P.val = ''; P.step = 'repeat'; drawPin(''); }
+      else if (P.val === P.first) { store.set('pin', pinHash(P.val)); closePin(); toast('PIN saved.'); P.ok(); }
+      else { P.val = ''; P.step = 'new'; drawPin('The two PINs differ. Try again.'); }
+    }, 150);
+  }
+  function pinKey(k) {
+    var P = S.pin, d = digitOf(k);
+    if (d >= 0) { pinDigit(String(d)); return true; }
+    if (isKey(k, KEY.BACK)) { if (P.val) { P.val = P.val.slice(0, -1); drawPin(); } else closePin(); return true; }
+    if (k === KEY.L && P.idx % 3) P.idx--;
+    else if (k === KEY.R && P.idx % 3 < 2) P.idx++;
+    else if (k === KEY.U && P.idx > 2) P.idx -= 3;
+    else if (k === KEY.D && P.idx < 9) P.idx += 3;
+    else if (k === KEY.OK) {
+      var c = PAD[P.idx];
+      if (c === '✕') { closePin(); return true; }
+      if (c === '⌫') P.val = P.val.slice(0, -1); else { pinDigit(c); return true; }
+    }
+    drawPin(); return true;
+  }
+  function unlock(then) {
+    if (profile.kids) { toast('Not available on the Kids profile.'); return; }
+    askPin('Enter the PIN to show adult content', function () { S.unlocked = true; buildNums(); toast('Adult content shown until APEX TV is closed.'); if (then) then(); });
+  }
+
+  // ---------- profiles ----------
+  function switchProfile(p) {
+    var go = function () {
+      store.set('profile', p.id);
+      try { sessionStorage.setItem('apextv.noreopen', '1'); } catch (e) { /* ignore */ }
+      location.reload();   // every list, favorite and position is per profile: start clean
+    };
+    if (p.id === profile.id) return;
+    if (profile.kids) askPin('Enter the PIN to leave the Kids profile', go);
+    else if (p.kids && !store.get('pin', '')) askPin('', go, true);   // the Kids profile needs a PIN to leave it
+    else go();
+  }
+  function profileMenu() {
+    var items = PROFILES.map(function (p) {
+      return { label: (p.id === profile.id ? '✓ ' : '    ') + p.name + (p.kids ? '  (no adult content)' : ''), act: function () { switchProfile(p); } };
+    });
+    if (S.unlocked) items.push({ label: '🔒 Hide adult content again', act: function () { S.unlocked = false; buildNums(); refreshTab(); } });
+    if (!profile.kids) items.push({ label: store.get('pin', '') ? 'Change PIN' : 'Set a PIN', act: function () {
+      if (store.get('pin', '')) askPin('Enter the current PIN', function () { askPin('', function () {}, true); });
+      else askPin('', function () {}, true);
+    } });
+    openMenu('Who is watching?', 'Profiles keep their own favorites, recent channels and Continue watching on this TV.', items);
+  }
+  function refreshTab() {   // after a lock/unlock: rebuild what is on screen
+    if (S.tab === 'live' || VODTAB[S.tab] || S.tab === 'recordings') redrawBrowse();
+    else if (S.tab === 'guide') { S.g = null; openGuide(); }
+    else if (S.tab === 'search') runSearch();
   }
 
   // ---------- sidebar ----------
   function renderSide() {
     $('cats').innerHTML = S.side.map(function (c) {
       return c.kind === 'hdr' ? '<div class="cat hdr">' + esc(c.name) + '</div>'
-        : '<div class="cat">' + esc(c.name) + (c.kind === 'home' ? '' : '<span class="n">' + c.t.length + '</span>') + '</div>';
+        : '<div class="cat">' + esc(c.name) + (c.kind === 'home' || c.kind === 'locked' ? '' : '<span class="n">' + c.t.length + '</span>') + '</div>';
     }).join('');
     focusSide();
   }
   function focusSide() {
-    if (S.tab === 'search') return;
+    if (S.tab === 'search' || S.tab === 'guide') return;
     var els = $('cats').children;
     for (var i = 0; i < els.length && i < S.side.length; i++) {
       if (S.side[i].kind === 'hdr') continue;
@@ -235,11 +421,18 @@
     if (S.side[i]) showSide(i);
   }
   function showSide(i) {
-    S.sideIdx = i;
     var item = S.side[i];
+    if (item.kind === 'locked') {   // the PIN, then the same category, now open
+      unlock(function () {
+        redrawBrowse();
+        for (var j = 0; j < S.side.length; j++) if (S.side[j].name === item.real) { showSide(j); break; }
+      });
+      return;
+    }
+    S.sideIdx = i;
     $('rows').classList.toggle('hidden', item.kind !== 'home');
     $('grid').classList.toggle('hidden', item.kind === 'home');
-    if (item.kind === 'home') renderRows();
+    if (item.kind === 'home') renderRows(S.tab === 'recordings' ? 'No recordings yet. Record from the Guide (OK on a programme) or from the player (● Record).' : '');
     else { S.list = item.t; S.tileIdx = 0; renderGrid(S.list, item.name === '★ Favorites' ? 'No favorites yet.' : 'Nothing here.'); }
     focusSide();
   }
@@ -303,7 +496,7 @@
     fetchEpg(part).then(function () { refreshNow(g); });
   }
   function focusTile() {
-    if (S.tab === 'search') return;
+    if (S.tab === 'search' || S.tab === 'guide') return;
     var g = $('grid');
     growGrid(S.tileIdx + cols() * 4);
     var old = g.querySelector('.tile.focus'); if (old) old.classList.remove('focus');
@@ -325,38 +518,52 @@
       S.tab = t;
       VIEW.forEach(function (k) { S[k] = CTX[t][k]; });
     }
-    $('view-browse').classList.toggle('hidden', t === 'search');
+    $('view-browse').classList.toggle('hidden', t === 'search' || t === 'guide');
     $('view-search').classList.toggle('hidden', t !== 'search');
+    $('view-guide').classList.toggle('hidden', t !== 'guide');
+    $('banner').classList.add('hidden');
     renderTabs();
     if (t === 'live') { if (S.T.length) redrawBrowse(); }
     else if (t === 'search') renderRows(S.rows.length ? '' : 'Search channels, movies and series.');
+    else if (t === 'guide') openGuide();
+    else if (t === 'recordings') openRecordings();
     else openVodTab(t);
   }
   function renderTabs() {
     var els = document.querySelectorAll('.tab');
     for (var i = 0; i < els.length; i++) els[i].className = 'tab' + (TABS[i] === S.tab ? ' active' : '') + (S.zone === 'tabs' && S.tabIdx === i ? ' focus' : '');
+    $('tab-profile').textContent = '👤 ' + profile.name;
   }
-  function openVodTab(tab) {
-    if (VOD[tabKind(tab)]) { redrawBrowse(); return; }
+  function showLoading(msg) {
     $('cats').innerHTML = '';
     $('grid').classList.add('hidden'); $('rows').classList.remove('hidden');
     S.side = []; S.rows = [];
-    $('rows').innerHTML = '<div class="msg big">Loading ' + tab + '…</div>';
-    loadVod(tabKind(tab)).then(function () {
+    $('rows').innerHTML = '<div class="msg big">' + msg + '</div>';
+  }
+  function openVodTab(tab) {
+    var cat = VODTAB[tab];
+    if (VOD[cat]) { redrawBrowse(); return; }
+    showLoading('Loading ' + (tab === 'library' ? 'your library' : tab) + '…');
+    loadVod(cat).then(function () {
       if (S.tab !== tab) return;
       vodBuild(tab); renderSide(); showSide(0);
       if (S.zone !== 'tabs') S.zone = 'rows';
       focusSide(); focusRow();
     }, function (e) {
-      if (S.tab === tab) $('rows').innerHTML = '<div class="msg big">Cannot load ' + tab + ': ' + esc(e && e.message || e) + '</div>';
+      if (S.tab !== tab) return;
+      var m = e && e.message || String(e);
+      $('rows').innerHTML = '<div class="msg big">' + (/not configured/.test(m)
+        ? 'My Library needs a Jellyfin API key on the APEX TV server. In Jellyfin: Dashboard › API Keys › + (name it APEX TV), then put the key in ~/.config/apex-tv/jellyfin.key on apex-streaming.'
+        : 'Cannot load ' + esc(tab) + ': ' + esc(m)) + '</div>';
     });
   }
 
-  // ---------- search: channels, movies and series ----------
+  // ---------- search: channels, movies, series and My Library ----------
   var qTimer = null;
   function match(list, q, max) {   // names starting with q first, then names containing it
     var a = [], b = [];
     for (var i = 0; i < list.length && a.length < max; i++) {
+      if (!visible(list[i])) continue;
       var at = list[i].nkey.indexOf(q);
       if (at === 0) a.push(list[i]); else if (at > 0 && b.length < max) b.push(list[i]);
     }
@@ -369,8 +576,9 @@
     var rows = [{ name: 'Channels', t: match(S.T, q, 80) }];
     if (VOD.movie) rows.push({ name: 'Movies', t: match(VOD.movie.items, q, 80) });
     if (VOD.series) rows.push({ name: 'Series', t: match(VOD.series.items, q, 80) });
+    if (VOD.lib) rows.push({ name: 'My Library', t: match(VOD.lib.items, q, 80) });
     S.rows = rows.filter(function (r) { return r.t.length; });
-    var missing = ['movie', 'series'].filter(function (k) { return !VOD[k] && !vodFailed[k]; });
+    var missing = ['movie', 'series', 'lib'].filter(function (k) { return !VOD[k] && !vodFailed[k]; });
     renderRows(missing.length ? 'Searching…' : 'Nothing matches "' + $('q').value.trim() + '".');
     if (missing.length) {
       Promise.all(missing.map(function (k) { return loadVod(k).catch(function () { return null; }); })).then(function () {
@@ -383,17 +591,18 @@
   function toggleFav(t) {
     var i = S.favs.indexOf(t.key);
     if (i >= 0) S.favs.splice(i, 1); else S.favs.unshift(t.key);
-    store.set('favs2', S.favs);
+    ps.set('favs2', S.favs);
     if (S.tab === 'live') build();
   }
   function addRecent(t) {
     S.recent = [t.key].concat(S.recent.filter(function (x) { return x !== t.key; })).slice(0, 24);
-    store.set('recent2', S.recent);
+    ps.set('recent2', S.recent);
+    ps.set('last', t.key);
   }
   function redrawBrowse() {   // rebuild the tab on screen (favorites, recent, Continue watching changed), keep the focus
     var side = S.side[S.sideIdx], name = side && side.name, cols = {}, rowName = S.rows[S.rowIdx] && S.rows[S.rowIdx].name, tile = S.tileIdx;
     S.rows.forEach(function (r, ri) { cols[r.name] = S.rowCol[ri] || 0; });   // rows move when Recently watched appears
-    if (S.tab === 'live') build(); else vodBuild(S.tab);
+    if (S.tab === 'live') build(); else if (S.tab === 'recordings') recBuild(); else vodBuild(S.tab);
     var i = 0; while (i < S.side.length && S.side[i].name !== name) i++;
     S.sideIdx = i < S.side.length ? i : 0;
     renderSide();
@@ -401,7 +610,7 @@
     $('rows').classList.toggle('hidden', !home);
     $('grid').classList.toggle('hidden', home);
     if (home) {
-      renderRows();
+      renderRows(S.tab === 'recordings' ? 'No recordings yet. Record from the Guide (OK on a programme) or from the player (● Record).' : '');
       S.rowIdx = Math.max(0, S.rows.map(function (r) { return r.name; }).indexOf(rowName));
       S.rowCol = S.rows.map(function (r) { return Math.min(cols[r.name] || 0, Math.max(0, r.t.length - 1)); });
       S.rows.forEach(function (r, ri) { if (S.rowCol[ri] >= ROW_FIRST) fillRow(ri); });
@@ -412,6 +621,25 @@
       if (!S.list.length && S.zone === 'grid') S.zone = 'side';
       focusSide(); focusTile();
     }
+  }
+
+  // ---------- number keys: type a channel number ----------
+  var numTimer = null;
+  function numKey(d) {
+    S.num = (S.num + d).slice(0, 4);
+    $('numbox').textContent = S.num; $('numbox').classList.remove('hidden');
+    clearTimeout(numTimer);
+    numTimer = setTimeout(numGo, S.num.length >= 4 ? 300 : 1500);
+  }
+  function numGo() {
+    var n = parseInt(S.num, 10), hit = S.byNum[n];
+    S.num = ''; $('numbox').classList.add('hidden');
+    if (!hit) { toast('No channel ' + n + '.', 2500); return; }
+    if (S.tab === 'guide' && $('player').classList.contains('hidden') && S.zone === 'guide') { guideJump(hit.t); return; }
+    if (S.det) closeDetails();
+    S.playList = S.numList; S.playIdx = S.numList.indexOf(hit.t);
+    $('player').classList.remove('hidden');
+    tune(0, hit.v);
   }
 
   // ---------- live player ----------
@@ -452,9 +680,11 @@
     var n = nextWorking(t, S.vIdx + 1);
     if (n < 0) n = nextWorking(t, 0);
     if (n >= 0) { S.vIdx = n; status('Trying ' + (t.v[n].label || 'another version') + '…'); S.loadTimer = setTimeout(startVideo, 400); }
-    else status('Channel unavailable. ▲▼ for another channel.');
+    else status(recBusy() ? 'Channel unavailable: the provider allows 1 stream and a recording is using it. ▲▼ for another channel.'
+      : 'Channel unavailable. ▲▼ for another channel.');
     showOsd(true);
   }
+  function recBusy() { return !!(S.recData && S.recData.recs.some(function (r) { return r.status === 'recording'; })); }
   function verdict(w, now) {   // why a live version counts as failed, or '' while it is fine
     // Before the first frame Dispatcharr may still be connecting to the source (Pluto-style sources take 10 s or more);
     // a source that is down ends the stream instead, which fails at once (LOADING_COMPLETE / ERROR).
@@ -523,14 +753,17 @@
     if (S.tab === 'live') {
       redrawBrowse();
       if (S.zone === 'rows') {
-        var c = S.rows[S.rowIdx].t.indexOf(cur);
+        var c = S.rows[S.rowIdx] ? S.rows[S.rowIdx].t.indexOf(cur) : -1;
         if (c >= 0) { if (c >= ROW_FIRST) fillRow(S.rowIdx); S.rowCol[S.rowIdx] = c; }
         focusRow();
-      } else { var i = S.list.indexOf(cur); if (i >= 0) S.tileIdx = i; S.zone = 'grid'; focusTile(); }
-    } else { S.zone = 'rows'; focusRow(); }
+      } else if (S.zone === 'grid' || S.zone === 'side') { var i = S.list.indexOf(cur); if (i >= 0) { S.tileIdx = i; S.zone = 'grid'; } focusTile(); }
+    } else if (S.tab === 'guide') { if (S.zone !== 'tabs') S.zone = 'guide'; guideJump(cur); }
+    else if (S.tab === 'search') { S.zone = 'rows'; focusRow(); }
+    else if (S.tab === 'recordings') redrawBrowse();
   }
   function status(t) { $('status').textContent = t; $('status').classList.toggle('hidden', !t); }
 
+  var OSD_BTNS = ['fav', 'ver', 'rec', 'list'];
   function showOsd(on) {
     clearTimeout(S.osdTimer);
     $('osd').classList.toggle('hidden', !on);
@@ -550,7 +783,7 @@
     $('osd-desc').textContent = p && p.now ? p.now[3] : '';
     if (!S.epg[t.tvg]) fetchEpg([t]).then(function () { if (S.playing === t && S.epg[t.tvg] && !$('osd').classList.contains('hidden')) showOsd(true); });
     focusBtn();
-    S.osdTimer = setTimeout(function () { if (S.osdBtn < 0 && !S.picker) showOsd(false); }, 6000);
+    S.osdTimer = setTimeout(function () { if (S.osdBtn < 0 && !S.picker && !S.menu) showOsd(false); }, 6000);
   }
   function focusBtn() {
     var b = document.querySelectorAll('.osd-buttons .btn');
@@ -570,6 +803,233 @@
     keepVisible($('picker-list'), $('picker-list').children[S.pickIdx]);
   }
   function closePicker() { S.picker = false; $('picker').classList.add('hidden'); }
+  function recordFromPlayer() {
+    var t = S.playing, p = nowProg(t), now = Math.floor(Date.now() / 1000);
+    if (p && p.now) { recordMenu(t, p.now, S.vIdx); return; }
+    openMenu('Record ' + t.name, 'No programme info for this channel: record a fixed time from now.', [
+      { label: '● Record 30 minutes', act: function () { recordProgram(t, [now, now + 1800, t.name, ''], 'once', S.vIdx); } },
+      { label: '● Record 1 hour', act: function () { recordProgram(t, [now, now + 3600, t.name, ''], 'once', S.vIdx); } },
+      { label: '● Record 2 hours', act: function () { recordProgram(t, [now, now + 7200, t.name, ''], 'once', S.vIdx); } },
+      { label: 'Cancel' }]);
+  }
+
+  // ---------- recording: schedule from the Guide or the player ----------
+  function chanOfUuid(u) {
+    if (!S.byUuid) { S.byUuid = {}; S.T.forEach(function (t) { t.v.forEach(function (v) { S.byUuid[v.id] = t; }); }); }
+    return S.byUuid[u];
+  }
+  function recOf(t, p) {   // the scheduled or running recording of this programme, if any
+    if (!S.recData) return null;
+    var ids = t.v.map(function (v) { return v.id; });
+    return S.recData.recs.filter(function (r) {
+      return ids.indexOf(r.uuid) >= 0 && r.start < p[1] && r.end > p[0] && (r.status === 'scheduled' || r.status === 'recording');
+    })[0] || null;
+  }
+  function recordMenu(t, p, vIdx) {
+    var now = Date.now() / 1000, onAir = p[0] <= now && p[1] > now, r = recOf(t, p), items = [];
+    var watching = S.playing === t && !$('player').classList.contains('hidden');
+    if (onAir && !watching) {
+      items.push({ label: '▶ Watch now', act: function () { var i = S.g ? S.g.list.indexOf(t) : -1; if (i >= 0) play(S.g.list, i); else play([t], 0); } });
+    }
+    // A block named after the channel is Dispatcharr's placeholder for a channel without a real guide: no episodes to follow.
+    var bare = function (x) { return norm(x).replace(/\b(sd|hd|fhd|uhd|4k|h265|hevc|alt)\b/g, '').replace(/\W/g, ''); };
+    var placeholder = bare(p[2]) === bare(t.name);
+    if (r) items.push({ label: r.status === 'recording' ? '■ Stop this recording' : '✕ Cancel this recording', act: function () { recAction(r.status === 'recording' ? 'stop' : 'delete', r); } });
+    else items.push({ label: onAir ? '● Record this show (from now)' : '● Record this show', act: function () { recordProgram(t, p, 'once', vIdx); } });
+    if (!placeholder) items.push({ label: '● Record every episode', act: function () { recordProgram(t, p, 'all', vIdx); } },
+      { label: '● Record new episodes only', act: function () { recordProgram(t, p, 'new', vIdx); } });
+    items.push({ label: 'Cancel' });
+    openMenu(p[2], day(p[0]) + '  ' + hm(p[0]) + '–' + hm(p[1]) + '  ·  ' + t.name + (placeholder ? '  ·  no real guide for this channel' : ''), items);
+  }
+  function recordProgram(t, p, mode, vIdx) {
+    var first = vIdx === undefined ? prefIdx(t) : vIdx, uuids = [t.v[first].id];
+    t.v.forEach(function (v) { if (uuids.indexOf(v.id) < 0) uuids.push(v.id); });
+    toast('Scheduling…', 3000);
+    postJson(API + 'api/rec/schedule', { uuids: uuids, start: p[0], stop: p[1], title: p[2], desc: p[3] || '', mode: mode }).then(function (d) {
+      var msg = mode === 'once' ? 'Recording scheduled: ' + p[2] + '.'
+        : 'Following "' + p[2] + '"' + (mode === 'new' ? ' (new episodes)' : '') + ': ' + (d.scheduled || 0) + ' upcoming scheduled.';
+      toast(msg + (d.warn && d.warn.length ? '  ' + d.warn.join(' ') : ''), 9000);
+      loadRecs().then(function () { if (S.tab === 'guide') drawGuide(); });
+    }).catch(function (e) { toast('Could not schedule: ' + (e && e.message || e), 8000); });
+  }
+  function loadRecs() {
+    return getJson(API + 'api/rec').then(function (d) { S.recData = d; return d; }).catch(function (e) { S.recErr = e && e.message || String(e); return null; });
+  }
+
+  // ---------- Recordings tab ----------
+  function openRecordings() {
+    showLoading('Loading recordings…');
+    loadRecs().then(function (d) {
+      if (S.tab !== 'recordings') return;
+      if (!d) { $('rows').innerHTML = '<div class="msg big">Cannot load recordings: ' + esc(S.recErr) + '</div>'; return; }
+      recBuild(); renderSide(); showSide(0);
+      if (S.zone !== 'tabs') S.zone = 'rows';
+      focusSide(); focusRow();
+    });
+  }
+  function recBuild() {
+    var d = S.recData, recs = d.recs.filter(function (r) { var c = chanOfUuid(r.uuid); return !c || visible(c); });
+    S.recItems = recs.map(function (r, i) { return { kind: 'rec', i: i, id: r.id, title: r.title, sub: r.sub, desc: r.desc, uuid: r.uuid,
+      chname: r.chname, start: r.start, end: r.end, status: r.status, err: r.err }; });
+    S.ruleItems = d.rules.map(function (r, i) { return { kind: 'rule', i: i, tvg: r.tvg, title: r.title, mode: r.mode, chname: r.chname }; });
+    var by = function (st) { return S.recItems.filter(function (r) { return st.indexOf(r.status) >= 0; }); };
+    var now = by(['recording']), sched = by(['scheduled']), done = by(['recorded', 'failed']).reverse();
+    S.side = [{ kind: 'home', name: 'Home', t: [] }, { kind: 'list', name: '● Recording now', t: now },
+      { kind: 'list', name: 'Scheduled', t: sched }, { kind: 'list', name: 'Recorded', t: done }, { kind: 'list', name: 'Series rules', t: S.ruleItems }];
+    S.rows = [];
+    if (now.length) S.rows.push({ name: '● Recording now', t: now });
+    if (done.length) S.rows.push({ name: 'Recorded', t: done });
+    if (sched.length) S.rows.push({ name: 'Scheduled', t: sched });
+    if (S.ruleItems.length) S.rows.push({ name: 'Series rules', t: S.ruleItems });
+    var disk = d.disk, lim = [];
+    for (var a in d.limits) lim.push('"' + a + '" allows ' + d.limits[a] + ' stream' + (d.limits[a] === 1 ? '' : 's') + ' at a time');
+    var warn = disk.free_gb < 20 ? '  ⚠ Disk almost full: delete recordings.' : '';
+    $('banner').innerHTML = '<b>Disk:</b> ' + disk.free_gb + ' GB free (about ' + disk.hours + ' h of HD)' + esc(warn) +
+      (lim.length ? '<br><b>Provider:</b> ' + esc(lim.join('; ')) + '. While a recording from it runs, its other channels cannot be watched; free channels still work.' : '');
+    $('banner').classList.toggle('warn', !!warn);
+    $('banner').classList.remove('hidden');
+  }
+  function recMenu(r) {
+    var p = S.epos['rec:' + r.id], items = [], sub = day(r.start) + '  ' + hm(r.start) + '–' + hm(r.end) + '  ·  ' + r.chname;
+    if (r.status === 'recorded') {
+      if (p && p[0] > 30 && p[0] < p[1] * 0.95) items.push({ label: '▶ Resume  ' + clockTime(p[0]), act: function () { playRec(r, p[0]); } }, { label: '↺ From the start', act: function () { playRec(r, 0); } });
+      else items.push({ label: '▶ Play', act: function () { playRec(r, 0); } });
+      items.push({ label: '🗑 Delete recording', act: function () { confirmDelete(r); } });
+    } else if (r.status === 'failed') {
+      sub += r.err ? '  ·  ' + r.err : '  ·  the recording failed';
+      items.push({ label: '▶ Try to play what was saved', act: function () { playRec(r, 0); } }, { label: '🗑 Delete', act: function () { recAction('delete', r); } });
+    } else if (r.status === 'recording') {
+      var t = chanOfUuid(r.uuid);
+      if (t) items.push({ label: '▶ Watch live', act: function () { var vi = 0; t.v.forEach(function (v, i) { if (v.id === r.uuid) vi = i; }); S.playList = [t]; S.playIdx = 0; $('player').classList.remove('hidden'); tune(0, vi); } });
+      items.push({ label: '■ Stop recording (keep what is saved)', act: function () { recAction('stop', r); } });
+    } else items.push({ label: '✕ Cancel recording', act: function () { recAction('delete', r); } });
+    items.push({ label: 'Back' });
+    openMenu(r.title, sub, items);
+  }
+  function ruleMenu(r) {
+    openMenu(r.title, (r.mode === 'new' ? 'New episodes only' : 'Every episode') + (r.chname ? ' · ' + r.chname : ''), [
+      { label: '🗑 Stop following (cancels its upcoming recordings)', act: function () {
+        postJson(API + 'api/rec/rule-delete', { tvg: r.tvg, title: r.title }).then(function () { toast('Stopped following ' + r.title + '.'); refreshRecs(); })
+          .catch(function (e) { toast('Failed: ' + (e && e.message || e), 8000); });
+      } }, { label: 'Back' }]);
+  }
+  function confirmDelete(r) {
+    openMenu('Delete "' + r.title + '"?', 'The file is removed from the server.', [{ label: '🗑 Delete', act: function () { recAction('delete', r); } }, { label: 'Keep it' }]);
+  }
+  function recAction(what, r) {
+    postJson(API + 'api/rec/' + what, { id: r.id }).then(function () {
+      toast(what === 'stop' ? 'Recording stopped.' : r.status === 'scheduled' ? 'Recording cancelled.' : 'Deleted.');
+      refreshRecs();
+    }).catch(function (e) { toast('Failed: ' + (e && e.message || e), 8000); });
+  }
+  function refreshRecs() {
+    loadRecs().then(function (d) {
+      if (!d) return;
+      if (S.tab === 'recordings' && !S.menu && $('player').classList.contains('hidden')) redrawBrowse();
+      else if (S.tab === 'guide') drawGuide();
+    });
+  }
+  function playRec(r, at) {
+    playVod(r, { name: r.title, dur: r.end - r.start, year: '' }, null, at);
+  }
+
+  // ---------- TV Guide ----------
+  function openGuide() {
+    if (S.g && S.g.list.length) { drawGuide(); return; }
+    $('g-body').innerHTML = '<div class="msg big">Loading the guide…</div>';
+    Promise.all([S.guideIds ? Promise.resolve(S.guideIds) : getJson(API + 'api/guide').then(function (d) { S.guideIds = {}; d.ids.forEach(function (i) { S.guideIds[i] = 1; }); return S.guideIds; }),
+      S.recData ? Promise.resolve() : loadRecs()]).then(function () {
+      var seen = {}, list = [];
+      tilesOf(S.favs).concat(S.numList, S.T.filter(visible)).forEach(function (t) {
+        if (!seen[t.key] && t.tvg && S.guideIds[t.tvg]) { seen[t.key] = 1; list.push(t); }
+      });
+      var now = Date.now() / 1000;
+      S.g = { list: list, top: 0, row: 0, t: now, win: Math.floor(now / 1800) * 1800, epg: {}, at: Date.now() };
+      if (S.tab === 'guide') drawGuide();
+    }).catch(function (e) { $('g-body').innerHTML = '<div class="msg big">Cannot load the guide: ' + esc(e && e.message || e) + '</div>'; });
+  }
+  function guideEpg() {   // full programme lists of the rows on screen and the next page
+    var G = S.g, need = G.list.slice(G.top, G.top + G_ROWS * 2).filter(function (t) { return !G.epg[t.tvg]; }).map(function (t) { return t.tvg; });
+    if (!need.length || G.loading) return;
+    G.loading = true;
+    getJson(API + 'api/epg?full=1&ids=' + encodeURIComponent(need.join(','))).then(function (d) {
+      need.forEach(function (id) { G.epg[id] = d[id] || []; });
+      G.loading = false;
+      if (S.g === G && S.tab === 'guide') drawGuide();
+    }).catch(function () { G.loading = false; });
+  }
+  function gProg(t, at) {   // the programme on t at time `at`, else the next one
+    var p = S.g.epg[t.tvg] || [];
+    for (var i = 0; i < p.length; i++) if (p[i][1] > at) return p[i];
+    return null;
+  }
+  function drawGuide() {
+    var G = S.g;
+    if (!G) return;
+    if (Date.now() - G.at > 1800000) { S.g = null; S.guideIds = null; openGuide(); return; }   // fresh guide data every 30 min
+    var now = Date.now() / 1000;
+    if (G.win + G_SPAN < now) G.win = Math.floor(now / 1800) * 1800;
+    if (G.t < now) G.t = now;
+    if (!G.list.length) { $('g-body').innerHTML = '<div class="msg big">No channel has guide data.</div>'; return; }
+    var head = '';
+    for (var s = G.win; s < G.win + G_SPAN; s += 1800) head += '<span style="left:' + ((s - G.win) / G_SPAN * 100) + '%">' + hm(s) + '</span>';
+    $('g-times').innerHTML = head;
+    var rows = G.list.slice(G.top, G.top + G_ROWS).map(function (t, ri) {
+      var r = G.top + ri, epg = G.epg[t.tvg], focus = S.zone === 'guide' && r === G.row, fp = focus ? gProg(t, G.t) : null, cells = '';
+      if (!epg) cells = '<div class="g-p muted" style="left:0;width:100%">Loading…</div>';
+      else if (!epg.length) cells = '<div class="g-p muted' + (focus ? ' focus' : '') + '" style="left:0;width:100%">No information</div>';
+      else epg.forEach(function (p) {
+        if (p[1] <= G.win || p[0] >= G.win + G_SPAN) return;
+        var a = Math.max(p[0], G.win), b = Math.min(p[1], G.win + G_SPAN), rec = recOf(t, p);
+        cells += '<div class="g-p' + (p === fp ? ' focus' : '') + (p[0] <= now && p[1] > now ? ' live' : '') + '" style="left:' +
+          ((a - G.win) / G_SPAN * 100) + '%;width:' + ((b - a) / G_SPAN * 100) + '%">' + (rec ? '<b class="recdot">●</b>' : '') +
+          (p[0] < G.win ? '‹ ' : '') + esc(p[2]) + '</div>';
+      });
+      var num = t.v[0].num;
+      return '<div class="g-row' + (focus ? ' focus' : '') + '"><div class="g-ch">' + (num ? '<span class="g-num">' + esc(num) + '</span>' : '') +
+        (t.logo ? '<img src="' + esc(t.logo) + '" alt="" onerror="this.style.display=\'none\'">' : '') + '<span class="g-name">' + esc(t.name) + '</span></div>' +
+        '<div class="g-line">' + cells + '</div></div>';
+    }).join('');
+    var nowLine = now >= G.win && now < G.win + G_SPAN ? '<div class="g-now" style="left:' + ((now - G.win) / G_SPAN * 100) + '%"></div>' : '';
+    $('g-body').innerHTML = '<div class="g-nowwrap">' + nowLine + '</div>' + rows;
+    var ft = G.list[G.row], fp2 = ft && G.epg[ft.tvg] ? gProg(ft, G.t) : null;
+    $('g-title').textContent = fp2 ? fp2[2] : ft ? ft.name : '';
+    $('g-time').textContent = fp2 ? day(fp2[0]) + '  ' + hm(fp2[0]) + '–' + hm(fp2[1]) + '  ·  ' + ft.name + (recOf(ft, fp2) ? '  ·  ● recording scheduled' : '') : '';
+    $('g-desc').textContent = fp2 ? fp2[3] : '';
+    guideEpg();
+  }
+  function guideKey(k) {
+    var G = S.g;
+    if (!G || !G.list.length) { if (k === KEY.U || isKey(k, KEY.BACK)) { toTabs(); return true; } return false; }
+    var t = G.list[G.row], fp = G.epg[t.tvg] ? gProg(t, G.t) : null, now = Date.now() / 1000, p = G.epg[t.tvg] || [];
+    if (k === KEY.U) { if (G.row > 0) G.row--; else { toTabs(); drawGuide(); return true; } }
+    else if (k === KEY.D) { if (G.row < G.list.length - 1) G.row++; }
+    else if (isKey(k, KEY.CHUP)) G.row = Math.max(0, G.row - G_ROWS);
+    else if (isKey(k, KEY.CHDN)) G.row = Math.min(G.list.length - 1, G.row + G_ROWS);
+    else if (k === KEY.R) {
+      var ni = fp ? p.indexOf(fp) + 1 : -1;
+      if (ni > 0 && p[ni]) G.t = p[ni][0]; else if (!fp) G.t += 1800; else return true;
+      while (G.t >= G.win + G_SPAN - 600) G.win += 1800;
+    } else if (k === KEY.L) {
+      var pi = fp ? p.indexOf(fp) - 1 : -1;
+      if (pi >= 0 && p[pi][1] > now) G.t = Math.max(p[pi][0], now); else if (!fp && G.t - 1800 > now) G.t -= 1800; else return true;
+      while (G.t < G.win && G.win - 1800 >= Math.floor(now / 1800) * 1800) G.win -= 1800;
+    } else if (k === KEY.OK) { if (fp) recordMenu(t, fp); else play(G.list, G.row); return true; }
+    else if (isKey(k, KEY.REC)) { if (fp) recordMenu(t, fp); return true; }
+    else if (isKey(k, KEY.BACK)) { toTabs(); drawGuide(); return true; }
+    else return false;
+    if (G.row < G.top) G.top = G.row; else if (G.row >= G.top + G_ROWS) G.top = G.row - G_ROWS + 1;
+    drawGuide();
+    return true;
+  }
+  function guideJump(t) {
+    var G = S.g;
+    if (!G) return;
+    var i = G.list.indexOf(t);
+    if (i < 0) { if (t) toast(t.name + ' has no guide data.', 3000); drawGuide(); return; }
+    G.row = i; G.top = Math.max(0, Math.min(i - 2, G.list.length - G_ROWS));
+    drawGuide();
+  }
 
   // ---------- movie / series page ----------
   function openDetails(t) {
@@ -577,7 +1037,7 @@
     $('details').classList.remove('hidden');
     $('d-backdrop').style.backgroundImage = '';
     drawDetails();
-    getJson(API + 'api/vod/info?kind=' + t.kind + '&id=' + t.id).then(function (d) {
+    getJson(API + (t.cat === 'lib' ? 'api/lib/info?id=' + encodeURIComponent(t.id) : 'api/vod/info?kind=' + t.kind + '&id=' + t.id)).then(function (d) {
       var D = S.det;
       if (!D || D.item !== t) return;
       D.info = d;
@@ -593,7 +1053,7 @@
     S.det = null;
     $('details').classList.add('hidden');
     if (S.tab === 'search') { S.zone = 'rows'; renderRows(); }   // posters show the new progress
-    else redrawBrowse();
+    else if (VODTAB[S.tab]) redrawBrowse();
   }
   function findEp(d, uuid) {
     var ss = d.seasons || [];
@@ -608,7 +1068,7 @@
   function detButtons() {
     var D = S.det, t = D.item, d = D.info, c = cwOf(t), out = [];
     if (!d) return out;
-    if (t.kind === 'movie') {
+    if (!isSeries(t)) {
       if (!d.uuid) return out;
       if (c && c.pos) out.push({ label: '▶ Resume  ' + clockTime(c.pos), act: 'resume' }, { label: '↺ From the start', act: 'start' });
       else out.push({ label: '▶ Play', act: 'start' });
@@ -637,10 +1097,10 @@
     $('d-credits').textContent = d ? [d.director ? 'Director: ' + d.director : '', d.cast ? 'Cast: ' + d.cast : ''].filter(Boolean).join('  ·  ') : '';
     $('d-btns').innerHTML = D.btns.map(function (b, i) {
       return '<div class="dbtn' + (D.zone === 'btns' && i === D.btn ? ' focus' : '') + '">' + esc(b.label) + '</div>';
-    }).join('') + (d && t.kind === 'series' && d.seasons && !d.seasons.length ? '<div class="muted">No episodes from the provider yet.</div>' : '');
+    }).join('') + (d && isSeries(t) && d.seasons && !d.seasons.length ? '<div class="muted">No episodes yet.</div>' : '');
     var ss = d && d.seasons || [];
     $('d-seasons').innerHTML = ss.length > 1 ? ss.map(function (s, i) {
-      return '<div class="season' + (i === D.si ? ' active' : '') + (D.zone === 'seasons' && i === D.si ? ' focus' : '') + '">Season ' + s.n + '</div>';
+      return '<div class="season' + (i === D.si ? ' active' : '') + (D.zone === 'seasons' && i === D.si ? ' focus' : '') + '">' + (s.n ? 'Season ' + s.n : 'Specials') + '</div>';
     }).join('') : '';
     $('d-seasons').classList.toggle('hidden', ss.length < 2);
     var eps = ss[D.si] ? ss[D.si].eps : [];
@@ -682,21 +1142,37 @@
   }
   function detAct(b) {
     var D = S.det, c = cwOf(D.item);
-    if (D.item.kind === 'movie') playVod(D.item, D.info, null, b.act === 'resume' && c ? c.pos : 0);
+    if (!isSeries(D.item)) playVod(D.item, D.info, null, b.act === 'resume' && c ? c.pos : 0);
     else if (b.ep) playVod(D.item, D.info, b.ep, b.pos || 0);
   }
 
-  // ---------- movie / episode player: the MP4 plays in the <video> element itself ----------
-  function vodDur() { var el = $('video'); return el.duration && isFinite(el.duration) ? el.duration : (S.vod && S.vod.dur) || 0; }
+  // ---------- movie / episode / recording player: the file plays in the <video> element itself ----------
+  // A library file the TV cannot play is asked from Jellyfin as an H.264/AAC MP4 transcode ("tc"): that stream
+  // starts at a given second (offset) and cannot seek, so a seek reloads it from the new second.
+  function vodUrl(v, at) {
+    var t = v.item;
+    if (t.kind === 'rec') return API + 'api/rec/file/' + t.id;
+    if (t.cat === 'lib') return API + 'api/lib/play/' + (v.ep ? v.ep.uuid : v.info.id) + (v.tc ? '?tc=1&t=' + Math.floor(at || 0) : '');
+    return DISPATCHARR + '/proxy/vod/' + (v.ep ? 'episode/' + v.ep.uuid : 'movie/' + v.info.uuid);
+  }
+  function curPos() { var v = S.vod; return (v && v.tc ? v.offset : 0) + ($('video').currentTime || 0); }
+  function vodDur() { var el = $('video'), v = S.vod; return !(v && v.tc) && el.duration && isFinite(el.duration) ? el.duration : (v && v.dur) || 0; }
   function vodTitle() { var v = S.vod; return v.info.name + (v.ep ? ' · ' + epLabel(v.ep) : ''); }
   function nextEp(v) { var d = v.info; return epAt(d, v.ep.si, v.ep.ei + 1) || epAt(d, v.ep.si + 1, 0); }
   function playVod(t, info, ep, at) {
     clearTimeout(S.loadTimer); stopVideo(); closePicker(); showOsd(false);
-    var v = S.vod = { item: t, info: info, ep: ep, dur: ep ? ep.dur : info.dur, seekTo: -1, seekTimer: null, savedAt: 0, started: false };
-    var el = $('video'), url = DISPATCHARR + '/proxy/vod/' + (ep ? 'episode/' + ep.uuid : 'movie/' + info.uuid);
+    var v = S.vod = { item: t, info: info, ep: ep, dur: ep ? ep.dur : info.dur, seekTo: -1, seekTimer: null, savedAt: 0, started: false, tc: false, offset: 0 };
     $('player').classList.remove('hidden');
-    status('Loading…');
-    el.onloadedmetadata = function () { if (at > 0 && (!el.duration || at < el.duration - 15)) el.currentTime = at; };
+    vodLoad(v, at);
+    showVosd();
+  }
+  function canTranscode(v) { return v.item.cat === 'lib' && !v.tc; }
+  function vodLoad(v, at) {
+    var el = $('video'), url = vodUrl(v, at);
+    stopVideo();
+    if (v.tc) v.offset = Math.floor(at || 0);
+    status(v.tc ? 'Converting for this TV…' : 'Loading…');
+    el.onloadedmetadata = function () { if (!v.tc && at > 0 && (!el.duration || at < el.duration - 15)) el.currentTime = at; };
     el.onplaying = function () { if (S.vod !== v) return; v.started = true; status(''); };
     el.onwaiting = function () { if (S.vod === v && v.started) status('Buffering…'); };
     el.ontimeupdate = function () {
@@ -707,7 +1183,8 @@
     el.onerror = function () {
       if (S.vod !== v) return;
       var code = el.error ? el.error.code : '?';
-      window.tvlog('play', vodTitle() + ': video error ' + code, { url: url });
+      window.tvlog('play', vodTitle() + ': video error ' + code + (v.tc ? ' (transcode)' : ''), { url: url });
+      if (canTranscode(v)) { v.tc = true; vodLoad(v, v.started ? curPos() : at); return; }   // Jellyfin converts it
       status('This title cannot be played here (error ' + code + '). Back to return.');
     };
     el.onended = function () { if (S.vod === v) vodEnded(); };
@@ -716,8 +1193,7 @@
     clearTimeout(S.vodTimer);
     S.vodTimer = setTimeout(function () {
       if (S.vod === v && !v.started) { window.tvlog('play', vodTitle() + ': not started after 40 s', { url: url }); status('This title does not start. Back to return.'); }
-    }, 40000);
-    showVosd();
+    }, v.tc ? 60000 : 40000);
   }
   function vodEnded() {
     var v = S.vod;
@@ -737,13 +1213,18 @@
       var c = cwOf(S.det.item), at = c && c.ep && S.det.info ? findEp(S.det.info, c.ep.uuid) : null;
       if (at && S.det.zone !== 'eps') { S.det.si = at[0]; S.det.ei = at[1]; }
       drawDetails();
-    }
+    } else if (S.tab === 'recordings') redrawBrowse();
   }
   function seek(d) {
-    var v = S.vod, el = $('video'), dur = vodDur(), base = v.seekTo >= 0 ? v.seekTo : el.currentTime || 0;
+    var v = S.vod, el = $('video'), dur = vodDur(), base = v.seekTo >= 0 ? v.seekTo : curPos();
     v.seekTo = Math.max(0, dur ? Math.min(dur - 3, base + d) : base + d);
-    clearTimeout(v.seekTimer);   // a burst of presses makes one jump (one new range request to Dispatcharr)
-    v.seekTimer = setTimeout(function () { if (S.vod !== v) return; el.currentTime = v.seekTo; v.seekTo = -1; drawVosd(); }, 700);
+    clearTimeout(v.seekTimer);   // a burst of presses makes one jump (one new range request)
+    v.seekTimer = setTimeout(function () {
+      if (S.vod !== v) return;
+      var to = v.seekTo; v.seekTo = -1;
+      if (v.tc) vodLoad(v, to); else el.currentTime = to;
+      drawVosd();
+    }, 700);
     showVosd();
   }
   function showVosd() {
@@ -758,9 +1239,9 @@
   function drawVosd() {
     var v = S.vod, el = $('video');
     if (!v) return;
-    var dur = vodDur(), pos = v.seekTo >= 0 ? v.seekTo : el.currentTime || 0;
+    var dur = vodDur(), pos = v.seekTo >= 0 ? v.seekTo : curPos();
     $('v-title').textContent = v.info.name;
-    $('v-sub').textContent = v.ep ? epLabel(v.ep) + '  ' + v.ep.title : (v.info.year || '');
+    $('v-sub').textContent = v.ep ? epLabel(v.ep) + '  ' + v.ep.title : v.item.kind === 'rec' ? day(v.item.start) + ' ' + hm(v.item.start) + ' · ' + v.item.chname : (v.info.year || '');
     $('v-bar').style.width = (dur ? Math.min(100, pos / dur * 100) : 0) + '%';
     $('v-pos').textContent = clockTime(pos);
     $('v-dur').textContent = dur ? '-' + clockTime(dur - pos) : '';
@@ -783,10 +1264,19 @@
 
   // ---------- keys ----------
   function onKey(e) {
-    var k = e.keyCode, inInput = document.activeElement === $('q');
-    if (inInput && k === 8) return;                        // Backspace edits the search text
-    if (inInput && k !== KEY.U && k !== KEY.D && k !== KEY.OK && !isKey(k, [10009, 461, 27])) return;
-    var handled = !$('player').classList.contains('hidden') ? playerKey(k) : S.det ? detailsKey(k) : browseKey(k);
+    var k = e.keyCode, inInput = document.activeElement === $('q'), handled;
+    if (S.pin) handled = pinKey(k);
+    else if (S.menu) handled = menuKey(k);
+    else {
+      if (inInput && k === 8) return;                      // Backspace edits the search text
+      if (inInput && k !== KEY.U && k !== KEY.D && k !== KEY.OK && !isKey(k, [10009, 461, 27])) return;
+      var d = digitOf(k), live = !$('player').classList.contains('hidden') && !S.vod;
+      if (d >= 0 && !inInput && !S.vod && !S.det && (live || S.zone !== 'tabs' || S.num)) { numKey(d); handled = true; }
+      else if (!$('player').classList.contains('hidden')) handled = playerKey(k);
+      else if (S.det) handled = detailsKey(k);
+      else if (S.tab === 'guide' && S.zone === 'guide') handled = guideKey(k);
+      else handled = browseKey(k);
+    }
     if (handled) e.preventDefault();
   }
 
@@ -808,18 +1298,21 @@
     var osdOpen = !$('osd').classList.contains('hidden');
     if (isKey(k, KEY.PLAYPAUSE)) { var vid = $('video'); if (vid.paused) vid.play(); else vid.pause(); return true; }
     if (isKey(k, KEY.STOP)) { closePlayer(); return true; }
+    if (isKey(k, KEY.REC)) { recordFromPlayer(); return true; }
     if (k === KEY.U || isKey(k, KEY.CHUP)) { S.playIdx = (S.playIdx - 1 + S.playList.length) % S.playList.length; tune(350); return true; }
     if (k === KEY.D || isKey(k, KEY.CHDN)) { S.playIdx = (S.playIdx + 1) % S.playList.length; tune(350); return true; }
     if (isKey(k, KEY.FAV)) { toggleFav(S.playing); showOsd(true); return true; }
     if (k === KEY.L || k === KEY.R) {
       if (!osdOpen) showOsd(true);
-      S.osdBtn = k === KEY.R ? Math.min(2, S.osdBtn + 1) : Math.max(0, S.osdBtn < 0 ? 0 : S.osdBtn - 1);
+      S.osdBtn = k === KEY.R ? Math.min(OSD_BTNS.length - 1, S.osdBtn + 1) : Math.max(0, S.osdBtn < 0 ? 0 : S.osdBtn - 1);
       focusBtn(); return true;
     }
     if (k === KEY.OK || isKey(k, KEY.INFO)) {
-      if (osdOpen && S.osdBtn === 0) { toggleFav(S.playing); showOsd(true); return true; }
-      if (osdOpen && S.osdBtn === 1) { openPicker(); return true; }
-      if (osdOpen && S.osdBtn === 2) { closePlayer(); return true; }
+      var act = osdOpen ? OSD_BTNS[S.osdBtn] : null;
+      if (act === 'fav') { toggleFav(S.playing); showOsd(true); return true; }
+      if (act === 'ver') { openPicker(); return true; }
+      if (act === 'rec') { recordFromPlayer(); return true; }
+      if (act === 'list') { closePlayer(); return true; }
       showOsd(!osdOpen); return true;
     }
     if (isKey(k, KEY.BACK)) { if (osdOpen) showOsd(false); else closePlayer(); return true; }
@@ -836,8 +1329,10 @@
       if (k === KEY.L) { S.tabIdx = Math.max(0, S.tabIdx - 1); renderTabs(); return true; }
       if (k === KEY.R) { S.tabIdx = Math.min(TABS.length - 1, S.tabIdx + 1); renderTabs(); return true; }
       if (k === KEY.OK || k === KEY.D) {
+        if (TABS[S.tabIdx] === 'profile') { if (k === KEY.OK) profileMenu(); return true; }
         setTab(TABS[S.tabIdx]);
         if (S.tab === 'search') toSearchBox();
+        else if (S.tab === 'guide') { S.zone = 'guide'; drawGuide(); }
         else { S.zone = S.side[S.sideIdx] && S.side[S.sideIdx].kind !== 'home' ? 'side' : 'rows'; focusSide(); focusRow(); }
         renderTabs(); return true;
       }
@@ -864,6 +1359,7 @@
       var row = S.rows[S.rowIdx], search = S.tab === 'search';
       if (!row) {
         if (k === KEY.U || isKey(k, KEY.BACK)) { if (search) toSearchBox(); else toTabs(); return true; }
+        if (k === KEY.L && !search && S.side.length) { S.zone = 'side'; focusSide(); return true; }
         return false;
       }
       n = row.t.length; c = S.rowCol[S.rowIdx];
@@ -902,11 +1398,13 @@
   document.addEventListener('click', function (e) {
     var t = e.target;
     if (!t.closest) return;
+    if (S.pin) { var pk = t.closest('.pk'); if (pk) { S.pin.idx = indexIn($('pin-pad'), pk); pinKey(KEY.OK); } return; }
+    if (S.menu) { var mi = t.closest('.mi'); if (mi) { S.menu.idx = indexIn($('menu-list'), mi); menuKey(KEY.OK); } else closeMenu(); return; }
     var tab = t.closest('.tab'), cat = t.closest('.cat'), tile = t.closest('.tile'), btn = t.closest('.btn'), pv = t.closest('.pv');
     if (!$('player').classList.contains('hidden')) {
       if (S.vod) { vodKey(KEY.OK); return; }
       if (pv) { S.pickIdx = indexIn($('picker-list'), pv); playerKey(KEY.OK); }
-      else if (btn) { S.osdBtn = ['fav', 'ver', 'list'].indexOf(btn.getAttribute('data-act')); playerKey(KEY.OK); }
+      else if (btn) { S.osdBtn = OSD_BTNS.indexOf(btn.getAttribute('data-act')); playerKey(KEY.OK); }
       else showOsd($('osd').classList.contains('hidden'));
       return;
     }
@@ -918,7 +1416,9 @@
       else if (ep) { D.zone = 'eps'; D.ei = indexIn($('d-eps'), ep); detailsKey(KEY.OK); }
       return;
     }
+    var grow = t.closest('.g-row');
     if (tab) { S.tabIdx = TABS.indexOf(tab.getAttribute('data-tab')); S.zone = 'tabs'; browseKey(KEY.OK); }
+    else if (grow && S.g) { S.zone = 'guide'; S.g.row = S.g.top + indexIn($('g-body'), grow) - 1; guideKey(KEY.OK); }
     else if (cat) { var ci = indexIn($('cats'), cat); if (S.side[ci] && S.side[ci].kind !== 'hdr') { S.zone = 'side'; showSide(ci); } }
     else if (tile) {
       var it = itemOf(tile), rowEl = tile.closest('.row');
@@ -932,13 +1432,18 @@
   document.addEventListener('keydown', onKey);
   $('q').addEventListener('input', function () { clearTimeout(qTimer); qTimer = setTimeout(runSearch, 300); });
   clock(); setInterval(clock, 10000);
-  setInterval(function () {                               // keep "now playing" lines fresh
-    if (!$('player').classList.contains('hidden') || S.tab !== 'live' && S.tab !== 'search') return;
+  var ticks = 0;
+  setInterval(function () {                               // every minute: the guide, recordings; every 5: "now playing" lines
+    ticks++;
+    if (!$('player').classList.contains('hidden') || S.menu || S.pin || S.det) return;
+    if (S.tab === 'guide') { drawGuide(); return; }
+    if (S.tab === 'recordings') { refreshRecs(); return; }
+    if ((S.tab !== 'live' && S.tab !== 'search') || ticks % 5) return;
     S.epg = {};
     var box = S.tab === 'search' ? $('srows') : (S.side[S.sideIdx] && S.side[S.sideIdx].kind === 'home' ? $('rows') : $('grid'));
     var tiles = Array.prototype.map.call(box.querySelectorAll('.tile[data-k^="c:"]'), itemOf);
     fetchEpg(tiles).then(function () { refreshNow(box); });
-  }, 300000);
+  }, 60000);
 
   setTab('live');
   var slow = setTimeout(function () {
@@ -946,12 +1451,21 @@
     window.tvlog('warn', 'boot screen still up after 20 s');
   }, 20000);
   load().then(function () {
+    buildNums();
     renderSide();
     showSide(0);
     S.zone = 'rows'; focusSide(); focusRow();             // start on Home, first row (favorites or last watched)
     clearTimeout(slow);
     $('boot').style.display = 'none';
-    window.tvlog('info', 'ready', { tiles: S.T.length, mse: !!(window.mpegts && mpegts.getFeatureList().mseLivePlayback) });
+    window.tvlog('info', 'ready', { tiles: S.T.length, profile: profile.id, mse: !!(window.mpegts && mpegts.getFeatureList().mseLivePlayback) });
+    loadRecs();                                           // the guide marks scheduled shows; a failure can say "recording busy"
+    var skip = false;
+    try { skip = sessionStorage.getItem('apextv.noreopen') === '1'; sessionStorage.removeItem('apextv.noreopen'); } catch (e) { /* ignore */ }
+    var last = S.byKey[ps.get('last', '')];
+    if (!skip && last && visible(last)) {                  // reopen the channel this profile watched last
+      var i = S.numList.indexOf(last);
+      if (i >= 0) play(S.numList, i); else play([last], 0);
+    }
   }).catch(function (e) {
     clearTimeout(slow);
     window.tvlog('error', 'channel list failed: ' + (e && e.message || e));
