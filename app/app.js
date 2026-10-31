@@ -18,7 +18,7 @@
   };
   // A missing element (an index.html from another version, a cached page) must not stop the app: $() then returns
   // a detached stand-in and the remote log says which id was missing.
-  var VERSION = '1.2.2', missing = {};
+  var VERSION = '1.2.3', missing = {};
   window.APEXTV_APP = VERSION;
   var $ = function (id) {
     var el = document.getElementById(id);
@@ -137,20 +137,35 @@
       .map(function (n) { return S.byNum[n].t; }).filter(function (t) { if (seen[t.key]) return false; seen[t.key] = 1; return true; });
   }
 
+  function parseVod(cat, d) {
+    var items = d.items.map(function (x, i) {
+      return { kind: cat === 'lib' ? (x[7] === 's' ? 'jseries' : 'jmovie') : cat, cat: cat, i: i, id: x[0], name: x[1], year: x[2],
+        logo: x[3], rating: x[4], tag: x[5], adult: x[6] === 1, nkey: norm(x[1]) };
+    });
+    var byId = {}; items.forEach(function (t) { byId[t.id] = t; });
+    var cats = d.cats.map(function (c) {
+      return c.hdr ? { kind: 'hdr', name: c.hdr } : { kind: 'cat', name: c.name, t: c.t.map(function (i) { return items[i]; }) };
+    });
+    return { items: items, byId: byId, cats: cats, rows: d.rows.map(function (i) { return cats[i]; }),
+      adult: items.filter(function (t) { return t.adult; }), updated: d.updated, at: Date.now() };
+  }
+  // My Library grows while the app is open (a download on the PC shows up in Jellyfin within a minute or two): opening
+  // the tab, or sitting on it, asks the server again at most once a minute and redraws if the library changed.
+  function refreshLib() {
+    var old = VOD.lib;
+    if (!old || Date.now() - old.at < 50000) return;
+    old.at = Date.now();
+    getJson(API + 'api/lib').then(function (d) {
+      if (VOD.lib !== old || d.updated === old.updated) return;
+      VOD.lib = parseVod('lib', d);
+      if (S.tab === 'library' && !S.det && !S.menu && !S.pin && $('player').classList.contains('hidden')) redrawBrowse();
+    }).catch(function () { /* keep what is shown */ });
+  }
   function loadVod(cat) {
     if (VOD[cat]) return Promise.resolve(VOD[cat]);
     if (!vodWait[cat]) {
       vodWait[cat] = getJson(API + (cat === 'lib' ? 'api/lib' : 'api/vod?kind=' + cat)).then(function (d) {
-        var items = d.items.map(function (x, i) {
-          return { kind: cat === 'lib' ? (x[7] === 's' ? 'jseries' : 'jmovie') : cat, cat: cat, i: i, id: x[0], name: x[1], year: x[2],
-            logo: x[3], rating: x[4], tag: x[5], adult: x[6] === 1, nkey: norm(x[1]) };
-        });
-        var byId = {}; items.forEach(function (t) { byId[t.id] = t; });
-        var cats = d.cats.map(function (c) {
-          return c.hdr ? { kind: 'hdr', name: c.hdr } : { kind: 'cat', name: c.name, t: c.t.map(function (i) { return items[i]; }) };
-        });
-        VOD[cat] = { items: items, byId: byId, cats: cats, rows: d.rows.map(function (i) { return cats[i]; }),
-          adult: items.filter(function (t) { return t.adult; }) };
+        VOD[cat] = parseVod(cat, d);
         vodFailed[cat] = false;
         return VOD[cat];
       }).catch(function (e) {
@@ -172,7 +187,7 @@
 
   function homeMsg() {   // Home of a tab with nothing to show
     return S.tab === 'library' && VOD.lib && !VOD.lib.items.length
-      ? 'Your Jellyfin (192.168.0.207) is connected but has no movies or shows yet. Add a library in Jellyfin (Dashboard › Libraries › Add Media Library, a folder with your videos): it shows up here within about 5 minutes.'
+      ? 'Nothing in My Library yet. Save movies to M:\\Movies and shows to M:\\Shows on the PC (\\\\192.168.0.176\\media): they show up here a minute or two after the download finishes.'
       : '';
   }
   function fetchEpg(tiles) {
@@ -535,7 +550,7 @@
   }
   function openVodTab(tab) {
     var cat = VODTAB[tab];
-    if (VOD[cat]) { redrawBrowse(); return; }
+    if (VOD[cat]) { redrawBrowse(); if (cat === 'lib') refreshLib(); return; }
     showLoading('Loading ' + (tab === 'library' ? 'your library' : tab) + '…');
     loadVod(cat).then(function () {
       if (S.tab !== tab) return;
@@ -1289,10 +1304,11 @@
   $('q').addEventListener('input', function () { clearTimeout(qTimer); qTimer = setTimeout(runSearch, 300); });
   clock(); setInterval(clock, 10000);
   var ticks = 0;
-  setInterval(function () {                               // every minute: the guide; every 5: "now playing" lines
+  setInterval(function () {                               // every minute: the guide, My Library; every 5: "now playing" lines
     ticks++;
     if (!$('player').classList.contains('hidden') || S.menu || S.pin || S.det) return;
     if (S.tab === 'guide') { drawGuide(); return; }
+    if (S.tab === 'library') { refreshLib(); return; }
     if ((S.tab !== 'live' && S.tab !== 'search') || ticks % 5) return;
     S.epg = {};
     var box = S.tab === 'search' ? $('srows') : (S.side[S.sideIdx] && S.side[S.sideIdx].kind === 'home' ? $('rows') : $('grid'));
