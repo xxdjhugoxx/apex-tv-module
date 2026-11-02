@@ -18,7 +18,7 @@
   };
   // A missing element (an index.html from another version, a cached page) must not stop the app: $() then returns
   // a detached stand-in and the remote log says which id was missing.
-  var VERSION = '1.2.5', missing = {};
+  var VERSION = '1.2.6', missing = {};
   window.APEXTV_APP = VERSION;
   var $ = function (id) {
     var el = document.getElementById(id);
@@ -99,6 +99,8 @@
   // ---------- data ----------
   function load() {
     return fetch(API + 'api/live').then(function (r) { return r.json(); }).then(function (d) {
+      // no channels yet: the server is waiting for Dispatcharr (just after a power cut); the boot screen retries
+      if (!d.tiles.length) throw new Error('the server is still loading channels from Dispatcharr');
       S.T = d.tiles.map(function (t, i) {
         return keyed({ kind: 'ch', i: i, key: t[0], name: t[1], logo: t[2], tvg: t[3], brand: t[4], adult: t[6] === 1,
           v: t[5].map(function (v) { return { id: v[0], label: v[1], num: v[2] }; }) });
